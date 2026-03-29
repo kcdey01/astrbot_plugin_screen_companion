@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import time
 from typing import Any
 
 from astrbot.api import logger
@@ -13,6 +14,8 @@ from ..web_server import WebServer
 
 
 class ScreenCompanionProactiveMixin:
+    AWAY_AUTO_PAUSE_EXCLUDED_SCENES = frozenset({"视频", "浏览-娱乐", "阅读"})
+
     def _parse_custom_presets(self) -> list:
         """解析自定义预设配置。"""
         self.parsed_custom_presets = []
@@ -387,6 +390,223 @@ class ScreenCompanionProactiveMixin:
             if index < len(segments) - 1 and delay_seconds > 0:
                 await asyncio.sleep(delay_seconds)
         return sent
+
+    def _ensure_away_pause_runtime_state(self) -> dict[str, Any]:
+        self._ensure_runtime_state()
+        state = getattr(self, "_away_pause_runtime_state", None)
+        if not isinstance(state, dict):
+            state = {}
+            self._away_pause_runtime_state = state
+
+        state.setdefault("active", False)
+        state.setdefault("started_at", 0.0)
+        state.setdefault("scene", "")
+        state.setdefault("task_id", "")
+        state.setdefault("target", "")
+        state.setdefault("pause_reason", "")
+        state.setdefault("long_notice_sent", False)
+        return state
+
+    def _reset_away_pause_runtime_state(self) -> None:
+        state = self._ensure_away_pause_runtime_state()
+        state.update(
+            {
+                "active": False,
+                "started_at": 0.0,
+                "scene": "",
+                "task_id": "",
+                "target": "",
+                "pause_reason": "",
+                "long_notice_sent": False,
+            }
+        )
+
+    def _resolve_away_pause_scene(self, task_id: str) -> str:
+        scene = ""
+        try:
+            snapshot_builder = getattr(self, "_build_current_activity_snapshot", None)
+            if callable(snapshot_builder):
+                snapshot = snapshot_builder()
+                if isinstance(snapshot, dict):
+                    scene = str(snapshot.get("scene", "") or "").strip()
+        except Exception:
+            scene = ""
+
+        if not scene:
+            try:
+                active_window_title, _ = self._get_active_window_info()
+                active_window_title = self._normalize_window_title(active_window_title)
+                if active_window_title:
+                    scene = self._identify_scene(active_window_title)
+            except Exception:
+                scene = ""
+
+        if not scene:
+            try:
+                scene = str(
+                    self._ensure_auto_screen_runtime_state(task_id).get("last_scene", "") or ""
+                ).strip()
+            except Exception:
+                scene = ""
+
+        normalize_scene = getattr(self, "_normalize_scene_label", None)
+        if callable(normalize_scene):
+            try:
+                return str(normalize_scene(scene) or "").strip()
+            except Exception:
+                return str(scene or "").strip()
+        return str(scene or "").strip()
+
+    def _scene_allows_away_auto_pause(self, scene: str) -> bool:
+        normalized_scene = str(scene or "").strip()
+        if not normalized_scene or normalized_scene == "未知":
+            return True
+        return normalized_scene not in self.AWAY_AUTO_PAUSE_EXCLUDED_SCENES
+
+    async def _get_away_pause_long_reply(
+        self,
+        target: str,
+        *,
+        idle_seconds: int,
+        scene: str,
+    ) -> str:
+        idle_label = self._format_elapsed_seconds(idle_seconds)
+        scene_label = str(scene or "当前任务").strip() or "当前任务"
+        fallback = f"你已经离开电脑前大概 {idle_label} 了，我先安静守着，等你回来再继续。"
+
+        provider = self.context.get_using_provider()
+        if not provider:
+            return fallback
+
+        try:
+            system_prompt = await self._get_persona_prompt(target)
+            prompt = (
+                "用户已经离开电脑前一段时间，你准备继续保持低打扰等待。"
+                f"\n当前离开时长：约 {idle_label}"
+                f"\n离开前场景：{scene_label}"
+                "\n请以你的性格写一句到两句简短消息：表达你注意到对方离开了，你先暂停观察、安静等他回来。"
+                "\n要求：不要催促，不要复盘，不要连续提问，不要编造离开期间发生的事情。"
+            )
+            response = await asyncio.wait_for(
+                provider.text_chat(prompt=prompt, system_prompt=system_prompt),
+                timeout=45.0,
+            )
+            if response and hasattr(response, "completion_text") and response.completion_text:
+                return str(response.completion_text).strip() or fallback
+        except Exception as e:
+            logger.debug(f"生成长时间离开提醒失败: {e}")
+        return fallback
+
+    def _get_away_pause_runtime_status(self) -> dict[str, Any]:
+        state = self._ensure_away_pause_runtime_state()
+        active = bool(state.get("active", False))
+        started_at = float(state.get("started_at", 0.0) or 0.0)
+        away_seconds = max(0, int(time.time() - started_at)) if active and started_at > 0 else 0
+        away_label = self._format_elapsed_seconds(away_seconds) if away_seconds > 0 else ""
+        scene = str(state.get("scene", "") or "").strip()
+        return {
+            "enabled": bool(getattr(self, "enable_away_auto_pause", False)),
+            "available": bool(getattr(self, "enable_input_stats", False)),
+            "active": active,
+            "scene": scene,
+            "scene_label": scene or "未锁定场景",
+            "away_seconds": away_seconds,
+            "away_label": away_label,
+            "detail": (
+                f"已自动挂起约 {away_label}，等待用户回到电脑前。"
+                if active and away_label
+                else "当前未触发离开自动挂起。"
+            ),
+            "long_notice_sent": bool(state.get("long_notice_sent", False)),
+        }
+
+    async def _handle_away_auto_pause(
+        self,
+        event: Any,
+        *,
+        task_id: str,
+    ) -> bool:
+        self._ensure_runtime_state()
+        state = self._ensure_away_pause_runtime_state()
+        if not bool(getattr(self, "enable_away_auto_pause", False)):
+            if state.get("active"):
+                self._reset_away_pause_runtime_state()
+            return False
+        if not bool(getattr(self, "enable_input_stats", False)):
+            if state.get("active"):
+                self._reset_away_pause_runtime_state()
+            return False
+
+        presence_reader = getattr(self, "_get_input_presence_snapshot", None)
+        presence = presence_reader() if callable(presence_reader) else {}
+        presence_status = str(presence.get("presence_status", "disabled") or "disabled")
+        idle_seconds = max(0, int(presence.get("idle_seconds", 0) or 0))
+        scene = self._resolve_away_pause_scene(task_id)
+        allows_pause = self._scene_allows_away_auto_pause(scene)
+        pause_threshold = max(300, int(getattr(self, "away_auto_pause_threshold", 1200) or 1200))
+        long_threshold = max(
+            pause_threshold + 60,
+            int(getattr(self, "away_long_notice_threshold", 3600) or 3600),
+        )
+        target = self._resolve_proactive_target(event)
+        should_pause = allows_pause and idle_seconds >= pause_threshold and presence_status in {"idle", "away"}
+
+        if should_pause:
+            if not bool(state.get("active", False)):
+                state.update(
+                    {
+                        "active": True,
+                        "started_at": time.time(),
+                        "scene": scene,
+                        "task_id": str(task_id or "").strip(),
+                        "target": target,
+                        "pause_reason": str(presence.get("presence_detail", "") or "").strip(),
+                        "long_notice_sent": False,
+                    }
+                )
+                if target:
+                    end_response = await self._get_end_response(target)
+                    intro = "看你像是暂时不在电脑前，我先把这边的自动观察挂起。"
+                    await self._send_plain_message(target, f"{intro}\n{end_response}".strip())
+                logger.info(f"[任务 {task_id}] 用户疑似离开电脑前，已进入自动挂起")
+            elif not bool(state.get("long_notice_sent", False)):
+                away_seconds = max(
+                    idle_seconds,
+                    int(time.time() - float(state.get("started_at", 0.0) or 0.0)),
+                )
+                if away_seconds >= long_threshold:
+                    long_target = str(state.get("target", "") or target).strip()
+                    if long_target:
+                        long_reply = await self._get_away_pause_long_reply(
+                            long_target,
+                            idle_seconds=away_seconds,
+                            scene=str(state.get("scene", "") or scene),
+                        )
+                        await self._send_plain_message(long_target, long_reply)
+                    state["long_notice_sent"] = True
+            return True
+
+        if bool(state.get("active", False)):
+            if presence_status == "active":
+                resume_target = str(state.get("target", "") or target).strip()
+                paused_seconds = max(
+                    idle_seconds,
+                    int(time.time() - float(state.get("started_at", 0.0) or 0.0)),
+                )
+                self._reset_away_pause_runtime_state()
+                if resume_target:
+                    start_response = await self._get_start_response(resume_target)
+                    intro = (
+                        "看到你回来继续操作了，我把这边的自动观察接上。"
+                        if paused_seconds < long_threshold
+                        else "你回来了，我把这边的自动观察重新接上。"
+                    )
+                    await self._send_plain_message(resume_target, f"{intro}\n{start_response}".strip())
+                logger.info(f"[任务 {task_id}] 检测到用户回到电脑前，已恢复自动观察")
+                return False
+            return True
+
+        return False
 
     def _build_window_companion_prompt(self, window_title: str, extra_prompt: str = "") -> str:
         """Build a focused prompt for window companion sessions."""

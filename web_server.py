@@ -1,6 +1,7 @@
 import asyncio
 import time
 import os
+import re
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -15,11 +16,17 @@ from astrbot.api import logger
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
 
+    APP_VERSION = "2.9.0"
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000
     START_RETRY_COUNT = 3
     START_RETRY_DELAY = 0.5
+    FOCUS_SESSION_THRESHOLD_SECONDS = 25 * 60
+    ACTIVITY_TREND_DAYS = 7
+    TOP_WINDOW_LIMIT = 5
+    ACTIVITY_SESSION_GAP_SECONDS = 12 * 60
+    ACTIVITY_SURFACE_LIMIT = 6
     SENSITIVE_SETTINGS_KEYS = frozenset(
         {
             "vision_api_key",
@@ -213,7 +220,7 @@ class WebServer:
                     for k, _ in sorted_sessions[:to_remove]:
                         self._sessions.pop(k, None)
                     logger.warning(
-                        f"Session 鏁伴噺瓒呰繃涓婇檺 {self.SESSION_MAX_COUNT}锛屽凡娓呯悊 {to_remove} 涓渶鏃х殑 session"
+                        f"Session 数量超过上限 {self.SESSION_MAX_COUNT}，已清理 {to_remove} 个最早过期的 session"
                     )
 
             exp = self._sessions.get(sid)
@@ -582,6 +589,1681 @@ class WebServer:
     def _format_duration(seconds: float | int) -> str:
         total_seconds = max(0, int(seconds or 0))
         return f"{int(total_seconds // 60)}分{int(total_seconds % 60)}秒"
+
+    @staticmethod
+    def _format_clock(timestamp_value: float | int | None) -> str:
+        try:
+            timestamp = float(timestamp_value or 0)
+        except Exception:
+            timestamp = 0.0
+        if timestamp <= 0:
+            return ""
+        return time.strftime("%H:%M", time.localtime(timestamp))
+
+    @staticmethod
+    def _format_datetime(timestamp_value: float | int | None) -> str:
+        try:
+            timestamp = float(timestamp_value or 0)
+        except Exception:
+            timestamp = 0.0
+        if timestamp <= 0:
+            return ""
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
+    @staticmethod
+    def _capture_source_label(source: Any) -> str:
+        source_key = str(source or "").strip()
+        mapping = {
+            "screen_analysis": "识屏轨迹",
+            "background_tracker": "独立轨迹",
+        }
+        return mapping.get(source_key, "其他来源")
+
+    @staticmethod
+    def _health_status_rank(status: str) -> int:
+        normalized = str(status or "ok").strip().lower()
+        if normalized == "error":
+            return 2
+        if normalized == "warn":
+            return 1
+        return 0
+
+    @staticmethod
+    def _health_status_label(status: str) -> str:
+        normalized = str(status or "ok").strip().lower()
+        labels = {
+            "ok": "正常",
+            "warn": "注意",
+            "error": "异常",
+        }
+        return labels.get(normalized, "正常")
+
+    @classmethod
+    def _merge_health_status(cls, current: str, new_status: str) -> str:
+        return (
+            str(new_status or "ok").strip().lower()
+            if cls._health_status_rank(new_status) > cls._health_status_rank(current)
+            else str(current or "ok").strip().lower()
+        )
+
+    @classmethod
+    def _build_health_check_entry(
+        cls,
+        *,
+        key: str,
+        title: str,
+        status: str,
+        detail: str,
+    ) -> dict[str, Any]:
+        normalized_status = str(status or "ok").strip().lower() or "ok"
+        return {
+            "key": key,
+            "title": title,
+            "status": normalized_status,
+            "status_label": cls._health_status_label(normalized_status),
+            "detail": str(detail or "").strip(),
+        }
+
+    def _build_health_payload(self) -> dict[str, Any]:
+        checks: list[dict[str, Any]] = []
+        recommendations: list[dict[str, str]] = []
+        overall_status = "ok"
+
+        def add_check(entry: dict[str, Any]) -> None:
+            nonlocal overall_status
+            checks.append(entry)
+            overall_status = self._merge_health_status(
+                overall_status,
+                str(entry.get("status", "ok") or "ok"),
+            )
+
+        static_targets = {
+            "index.html": self.static_dir / "index.html",
+            "app.js": self.static_dir / "app.js",
+            "app.css": self.static_dir / "app.css",
+        }
+        missing_static = [
+            name for name, path in static_targets.items() if not path.is_file()
+        ]
+        add_check(
+            self._build_health_check_entry(
+                key="static_assets",
+                title="WebUI 静态资源",
+                status="error" if missing_static else "ok",
+                detail=(
+                    f"缺少 {', '.join(missing_static)}"
+                    if missing_static
+                    else f"静态目录可用：{self.static_dir}"
+                ),
+            )
+        )
+        if missing_static:
+            recommendations.append(
+                {
+                    "title": "检查 WebUI 资源目录",
+                    "body": "当前 WebUI 缺少必要静态文件。请确认插件目录完整覆盖，且 web 目录下的 index.html、app.js、app.css 都已更新。",
+                }
+            )
+
+        diary_dir = Path(str(getattr(self.plugin, "diary_storage", "") or "").strip())
+        add_check(
+            self._build_health_check_entry(
+                key="diary_storage",
+                title="日记目录",
+                status="ok" if diary_dir.is_dir() else "warn",
+                detail=(
+                    f"当前目录：{diary_dir}"
+                    if diary_dir.is_dir()
+                    else f"目录不可用：{diary_dir or '未配置'}"
+                ),
+            )
+        )
+
+        learning_dir = Path(
+            str(getattr(self.plugin, "learning_storage", "") or "").strip()
+        )
+        add_check(
+            self._build_health_check_entry(
+                key="learning_storage",
+                title="学习与轨迹目录",
+                status="ok" if learning_dir.is_dir() else "warn",
+                detail=(
+                    f"当前目录：{learning_dir}"
+                    if learning_dir.is_dir()
+                    else f"目录不可用：{learning_dir or '未配置'}"
+                ),
+            )
+        )
+
+        activity_count = len(getattr(self.plugin, "activity_history", []) or [])
+        add_check(
+            self._build_health_check_entry(
+                key="activity_history",
+                title="活动轨迹样本",
+                status="ok",
+                detail=f"当前累计 {activity_count} 条活动轨迹记录。",
+            )
+        )
+
+        input_stats = self._safe_plugin_call("_get_input_stats_runtime_status", {}) or {}
+        input_stats_enabled = bool(input_stats.get("enabled"))
+        input_stats_available = bool(input_stats.get("available"))
+        add_check(
+            self._build_health_check_entry(
+                key="input_stats",
+                title="本地输入统计",
+                status="warn" if input_stats_enabled and not input_stats_available else "ok",
+                detail=str(
+                    input_stats.get("detail")
+                    or ("已启用" if input_stats_enabled else "未启用")
+                ),
+            )
+        )
+        if input_stats_enabled and not input_stats_available:
+            recommendations.append(
+                {
+                    "title": "检查输入监听权限",
+                    "body": "本地输入统计已开启但当前不可用。请确认系统已授予全局键盘、鼠标监听或无障碍权限，并检查依赖是否安装完整。",
+                }
+            )
+
+        background_tracking = self._safe_plugin_call(
+            "_get_background_activity_tracking_runtime_status",
+            {},
+        ) or {}
+        background_enabled = bool(background_tracking.get("enabled"))
+        background_active = bool(background_tracking.get("active"))
+        background_interval = int(background_tracking.get("interval", 15) or 15)
+        background_detail = (
+            f"已启用，当前{'正在采样' if background_active else '等待插件空闲时接管'}，采样间隔 {background_interval} 秒。"
+            if background_enabled
+            else "未启用独立活动轨迹采集。"
+        )
+        add_check(
+            self._build_health_check_entry(
+                key="background_tracking",
+                title="独立活动轨迹采集",
+                status="ok",
+                detail=background_detail,
+            )
+        )
+
+        rule_summary = self._safe_plugin_call(
+            "_get_activity_recognition_rule_summary",
+            {},
+        ) or {}
+        invalid_lines = int(rule_summary.get("invalid_lines", 0) or 0)
+        add_check(
+            self._build_health_check_entry(
+                key="recognition_rules",
+                title="轨迹识别规则",
+                status="warn" if invalid_lines > 0 else "ok",
+                detail=(
+                    f"已生效 {int(rule_summary.get('total_rules', 0) or 0)} 条规则，另有 {invalid_lines} 行格式未生效。"
+                    if invalid_lines > 0
+                    else f"已生效 {int(rule_summary.get('total_rules', 0) or 0)} 条规则。"
+                ),
+            )
+        )
+        if invalid_lines > 0:
+            recommendations.append(
+                {
+                    "title": "修正未生效的识别规则",
+                    "body": "有自定义规则因为格式不正确而没有生效。请确认每行都写成 app|关键词|显示名 或 site|关键词/域名|显示名。",
+                }
+            )
+
+        try:
+            window_titles = self.plugin._list_open_window_titles()
+            window_count = len(window_titles or [])
+            window_detail = (
+                f"当前读取到 {window_count} 个窗口标题。"
+                if window_count > 0
+                else "当前没有读到窗口标题，可能是桌面环境、权限或当前桌面状态导致。"
+            )
+            add_check(
+                self._build_health_check_entry(
+                    key="window_probe",
+                    title="窗口读取能力",
+                    status="warn" if window_count <= 0 else "ok",
+                    detail=window_detail,
+                )
+            )
+        except Exception as e:
+            add_check(
+                self._build_health_check_entry(
+                    key="window_probe",
+                    title="窗口读取能力",
+                    status="error",
+                    detail=f"读取窗口失败：{e}",
+                )
+            )
+            recommendations.append(
+                {
+                    "title": "检查窗口读取环境",
+                    "body": "WebUI 自检在读取窗口列表时失败。请确认当前实例运行在有图形桌面的环境中，并检查相关桌面权限。",
+                }
+            )
+
+        warning_count = sum(1 for item in checks if item.get("status") == "warn")
+        error_count = sum(1 for item in checks if item.get("status") == "error")
+        return {
+            "status": overall_status,
+            "checks": checks,
+            "recommendations": recommendations,
+            "warning_count": warning_count,
+            "error_count": error_count,
+        }
+
+    @staticmethod
+    def _build_empty_activity_period() -> dict[str, Any]:
+        return {
+            "work_time": "0分0秒",
+            "play_time": "0分0秒",
+            "other_time": "0分0秒",
+            "total_time": "0分0秒",
+            "display_total_time": "0分0秒",
+            "work_seconds": 0,
+            "play_seconds": 0,
+            "other_seconds": 0,
+            "total_seconds": 0,
+            "display_total_seconds": 0,
+            "effective_work_seconds": 0,
+            "effective_work_time": "0分0秒",
+            "effective_work_ratio": "0%",
+            "idle_trimmed_seconds": 0,
+            "idle_trimmed_time": "0分0秒",
+            "has_input_estimate": False,
+            "session_count": 0,
+            "focus_session_count": 0,
+            "focus_session_label": "0 段",
+            "switch_count": 0,
+            "switch_count_label": "0 次",
+            "unique_window_count": 0,
+            "work_ratio": "0%",
+            "start_clock": "",
+            "end_clock": "",
+            "active_span_seconds": 0,
+            "active_span_time": "0分0秒",
+            "longest_focus_seconds": 0,
+            "longest_focus_time": "0分0秒",
+            "longest_focus_window": "",
+            "longest_focus_scene": "",
+            "top_window": {},
+            "top_windows": [],
+        }
+
+    @staticmethod
+    def _activity_bucket_key(activity_type: Any) -> str:
+        label = str(activity_type or "").strip()
+        if label == "工作":
+            return "work"
+        if label == "摸鱼":
+            return "play"
+        return "other"
+
+    @classmethod
+    def _activity_bucket_label(cls, activity_type: Any) -> str:
+        normalized = str(activity_type or "").strip().lower()
+        if normalized in {"work", "play", "other"}:
+            bucket = normalized
+        else:
+            bucket = cls._activity_bucket_key(activity_type)
+        if bucket == "work":
+            return "工作"
+        if bucket == "play":
+            return "摸鱼"
+        return "其他"
+
+    @staticmethod
+    def _get_activity_day_key(timestamp_value: float | int | None) -> str:
+        try:
+            timestamp = float(timestamp_value or 0)
+        except Exception:
+            timestamp = 0.0
+        if timestamp <= 0:
+            return ""
+        return time.strftime("%Y-%m-%d", time.localtime(timestamp))
+
+    @staticmethod
+    def _mask_window_title(window_name: Any) -> str:
+        raw_window = str(window_name or "").strip()
+        if not raw_window:
+            return "未命名窗口"
+
+        for separator in (" - ", " — ", " | ", " · "):
+            if separator in raw_window:
+                parts = [part.strip() for part in raw_window.split(separator) if str(part).strip()]
+                if len(parts) >= 2:
+                    return f"已脱敏 · {parts[-1][:36]}"
+        return "已脱敏窗口"
+
+    def _normalize_activity_item_for_display(self, item: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        clone = dict(item)
+        window_text = str(clone.get("window", "") or "").strip()
+        app_name = str(clone.get("app_name", "") or "").strip()
+        site_domain = str(clone.get("site_domain", "") or "").strip()
+        site_label = str(clone.get("site_label", "") or "").strip() or site_domain
+        page_title = str(clone.get("page_title", "") or "").strip()
+        if self._plugin_bool("mask_activity_window_titles"):
+            clone["window"] = self._mask_window_title(window_text)
+            if site_label and site_label != site_domain and not re.search(r"\.[a-z]{2,}$", site_label, flags=re.IGNORECASE):
+                clone["site_label"] = "已脱敏网页"
+            else:
+                clone["site_label"] = site_label
+            clone["page_title"] = "已脱敏页面" if page_title else ""
+        else:
+            clone["window"] = window_text or "未命名窗口"
+            clone["site_label"] = site_label
+            clone["page_title"] = page_title
+        clone["app_name"] = app_name
+        clone["site_domain"] = site_domain
+        clone["resource_kind"] = str(clone.get("resource_kind", "") or ("site" if clone["site_label"] else "app"))
+        clone["resource_label"] = str(
+            clone.get("resource_label", "")
+            or clone["page_title"]
+            or clone["site_label"]
+            or app_name
+            or clone["window"]
+            or "未命名活动"
+        ).strip()
+        raw_duration = max(0.0, float(clone.get("raw_duration", clone.get("duration", 0)) or 0))
+        clone["duration"] = raw_duration
+        clone["raw_duration"] = raw_duration
+        return clone
+
+    def _build_input_active_ranges(self) -> dict[str, list[tuple[float, float]]]:
+        if not self._plugin_bool("enable_input_stats"):
+            return {}
+
+        daily = getattr(self.plugin, "input_stats_daily", {})
+        if not isinstance(daily, dict):
+            return {}
+
+        grace_seconds = max(
+            60,
+            int(getattr(self.plugin, "ACTIVITY_INPUT_GRACE_SECONDS", 5 * 60) or 5 * 60),
+        )
+        raw_ranges: dict[str, list[tuple[float, float]]] = defaultdict(list)
+
+        for day_key, payload in daily.items():
+            minute_buckets = payload.get("minute_buckets", {}) if isinstance(payload, dict) else {}
+            if not isinstance(minute_buckets, dict):
+                continue
+            for minute_key in minute_buckets.keys():
+                try:
+                    minute_dt = datetime.strptime(f"{day_key} {minute_key}", "%Y-%m-%d %H:%M")
+                except Exception:
+                    continue
+
+                range_start = minute_dt.timestamp() - 60
+                range_end = minute_dt.timestamp() + 60 + grace_seconds
+                current_start = range_start
+                while current_start < range_end:
+                    current_day = datetime.fromtimestamp(current_start).date()
+                    current_day_start = datetime.combine(current_day, datetime.min.time())
+                    next_day_start = current_day_start + timedelta(days=1)
+                    segment_end = min(range_end, next_day_start.timestamp())
+                    raw_ranges[current_day.isoformat()].append((current_start, segment_end))
+                    current_start = segment_end
+
+        merged_ranges: dict[str, list[tuple[float, float]]] = {}
+        for day_key, ranges in raw_ranges.items():
+            ordered = sorted(
+                [
+                    (float(start or 0), float(end or 0))
+                    for start, end in ranges
+                    if float(end or 0) > float(start or 0)
+                ],
+                key=lambda item: item[0],
+            )
+            merged: list[list[float]] = []
+            for start, end in ordered:
+                if not merged or start > merged[-1][1]:
+                    merged.append([start, end])
+                else:
+                    merged[-1][1] = max(merged[-1][1], end)
+            merged_ranges[day_key] = [(start, end) for start, end in merged]
+
+        return merged_ranges
+
+    def _estimate_input_overlap_seconds(
+        self,
+        start_time: float,
+        end_time: float,
+        input_active_ranges: dict[str, list[tuple[float, float]]],
+    ) -> float:
+        interval_start = float(start_time or 0)
+        interval_end = float(end_time or 0)
+        if interval_end <= interval_start:
+            return 0.0
+
+        overlap_seconds = 0.0
+        cursor_day = datetime.fromtimestamp(interval_start).date()
+        last_day = datetime.fromtimestamp(max(interval_start, interval_end - 1)).date()
+
+        while cursor_day <= last_day:
+            day_start = datetime.combine(cursor_day, datetime.min.time()).timestamp()
+            day_end = (datetime.combine(cursor_day, datetime.min.time()) + timedelta(days=1)).timestamp()
+            segment_start = max(interval_start, day_start)
+            segment_end = min(interval_end, day_end)
+            if segment_end > segment_start:
+                for active_start, active_end in input_active_ranges.get(cursor_day.isoformat(), []):
+                    if active_end <= segment_start:
+                        continue
+                    if active_start >= segment_end:
+                        break
+                    overlap_seconds += max(
+                        0.0,
+                        min(segment_end, active_end) - max(segment_start, active_start),
+                    )
+            cursor_day += timedelta(days=1)
+
+        return overlap_seconds
+
+    def _estimate_activity_effective_seconds(
+        self,
+        item: dict[str, Any],
+        input_active_ranges: dict[str, list[tuple[float, float]]],
+    ) -> tuple[float, float, bool]:
+        raw_duration = max(0.0, float(item.get("raw_duration", item.get("duration", 0)) or 0))
+        if raw_duration <= 0:
+            return 0.0, 0.0, False
+        if self._activity_bucket_key(item.get("type", "")) != "work":
+            return raw_duration, 0.0, False
+        if not input_active_ranges:
+            return raw_duration, 0.0, False
+
+        start_time = float(item.get("start_time", 0) or 0)
+        end_time = float(item.get("end_time", 0) or 0)
+        if start_time <= 0:
+            return raw_duration, 0.0, False
+        if end_time <= start_time:
+            end_time = start_time + raw_duration
+
+        effective_seconds = min(
+            raw_duration,
+            self._estimate_input_overlap_seconds(start_time, end_time, input_active_ranges),
+        )
+        idle_trimmed_seconds = max(0.0, raw_duration - effective_seconds)
+        return effective_seconds, idle_trimmed_seconds, True
+
+    def _prepare_activity_history_for_display(
+        self,
+        activity_history: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        input_active_ranges = self._build_input_active_ranges()
+        for item in activity_history or []:
+            normalized = self._normalize_activity_item_for_display(item)
+            if normalized is not None:
+                effective_seconds, idle_trimmed_seconds, has_estimate = self._estimate_activity_effective_seconds(
+                    normalized,
+                    input_active_ranges,
+                )
+                normalized["effective_duration"] = float(
+                    effective_seconds if has_estimate else normalized.get("raw_duration", normalized.get("duration", 0))
+                )
+                normalized["idle_trimmed_seconds"] = float(idle_trimmed_seconds if has_estimate else 0.0)
+                normalized["has_input_estimate"] = bool(has_estimate)
+                normalized["effective_duration_label"] = self._format_duration(
+                    normalized.get("effective_duration", 0)
+                )
+                normalized["raw_duration_label"] = self._format_duration(
+                    normalized.get("raw_duration", 0)
+                )
+                normalized["idle_trimmed_label"] = self._format_duration(
+                    normalized.get("idle_trimmed_seconds", 0)
+                )
+                prepared.append(normalized)
+        return prepared
+
+    def _build_activity_session_digest(
+        self,
+        session: dict[str, Any],
+        *,
+        index: int,
+    ) -> dict[str, Any] | None:
+        bucket_seconds = session.get("bucket_seconds", {}) if isinstance(session.get("bucket_seconds", {}), dict) else {}
+        total_seconds = int(session.get("active_seconds", 0) or 0)
+        if total_seconds <= 0:
+            return None
+
+        dominant_bucket = max(
+            ("work", "play", "other"),
+            key=lambda key: float(bucket_seconds.get(key, 0) or 0),
+        )
+        work_seconds = int(bucket_seconds.get("work", 0) or 0)
+        play_seconds = int(bucket_seconds.get("play", 0) or 0)
+        switch_count = int(session.get("switch_count", 0) or 0)
+        entry_count = int(session.get("entry_count", 0) or 0)
+        gap_seconds = int(session.get("gap_from_previous", 0) or 0)
+        work_ratio_value = round((work_seconds / total_seconds) * 100) if total_seconds > 0 else 0
+        raw_total_seconds = int(session.get("raw_seconds", total_seconds) or total_seconds)
+        idle_trimmed_seconds = int(session.get("idle_trimmed_seconds", 0) or 0)
+        has_input_estimate = bool(session.get("has_input_estimate", False))
+
+        window_seconds = session.get("window_seconds", {}) if isinstance(session.get("window_seconds", {}), dict) else {}
+        if window_seconds:
+            top_window, top_window_seconds = max(
+                window_seconds.items(),
+                key=lambda item: float(item[1] or 0),
+            )
+        else:
+            top_window, top_window_seconds = "未命名窗口", 0
+
+        scene_seconds = session.get("scene_seconds", {}) if isinstance(session.get("scene_seconds", {}), dict) else {}
+        if scene_seconds:
+            top_scene, _ = max(
+                scene_seconds.items(),
+                key=lambda item: float(item[1] or 0),
+            )
+        else:
+            top_scene = ""
+
+        app_seconds = session.get("app_seconds", {}) if isinstance(session.get("app_seconds", {}), dict) else {}
+        if app_seconds:
+            top_app, _ = max(
+                app_seconds.items(),
+                key=lambda item: float(item[1] or 0),
+            )
+        else:
+            top_app = ""
+
+        site_seconds = session.get("site_seconds", {}) if isinstance(session.get("site_seconds", {}), dict) else {}
+        if site_seconds:
+            top_site, _ = max(
+                site_seconds.items(),
+                key=lambda item: float(item[1] or 0),
+            )
+        else:
+            top_site = ""
+
+        source_seconds = session.get("source_seconds", {}) if isinstance(session.get("source_seconds", {}), dict) else {}
+        if source_seconds:
+            primary_capture_source, _ = max(
+                source_seconds.items(),
+                key=lambda item: float(item[1] or 0),
+            )
+        else:
+            primary_capture_source = ""
+        source_labels = [
+            self._capture_source_label(source_key)
+            for source_key in source_seconds.keys()
+            if str(source_key or "").strip()
+        ]
+        source_mix_label = ""
+        if source_labels:
+            source_mix_label = (
+                f"混合轨迹 · {source_labels[0]}为主"
+                if len(source_labels) > 1
+                else source_labels[0]
+            )
+
+        tone = ""
+        state_label = "稳定推进"
+        if dominant_bucket == "play" or play_seconds > work_seconds:
+            state_label = "放松调整"
+            tone = "warm"
+        elif work_seconds >= self.FOCUS_SESSION_THRESHOLD_SECONDS:
+            state_label = "深度专注"
+            tone = "good"
+        elif switch_count >= 6:
+            state_label = "频繁切换"
+            tone = "warm"
+        elif total_seconds < 15 * 60:
+            state_label = "短时处理"
+        elif work_seconds > 0:
+            state_label = "稳定推进"
+            tone = "good"
+
+        continuation_label = "这是今天记录到的第一个工作段"
+        if index > 0 and gap_seconds > 0:
+            continuation_label = f"与上一段间隔 {self._format_duration(gap_seconds)}"
+        elif index > 0:
+            continuation_label = "与上一段几乎无缝衔接"
+
+        start_time = float(session.get("start_time", 0) or 0)
+        end_time = float(session.get("end_time", 0) or 0)
+        range_parts = [self._format_clock(start_time), self._format_clock(end_time)]
+        effective_note = ""
+        if has_input_estimate and idle_trimmed_seconds > 0:
+            effective_note = f"按本地输入估算后，扣除了约 {self._format_duration(idle_trimmed_seconds)} 的空闲时间"
+
+        summary_parts = [f"主窗口 {top_window}"]
+        if top_app:
+            summary_parts.append(f"主应用 {top_app}")
+        if top_site:
+            summary_parts.append(f"主站点 {top_site}")
+        elif top_scene:
+            summary_parts.append(f"主场景 {top_scene}")
+
+        return {
+            "range_label": " - ".join([part for part in range_parts if part]) or "时间未知",
+            "duration": self._format_duration(total_seconds),
+            "duration_seconds": total_seconds,
+            "dominant_bucket": dominant_bucket,
+            "raw_duration": self._format_duration(raw_total_seconds),
+            "raw_duration_seconds": raw_total_seconds,
+            "state_label": state_label,
+            "tone": tone,
+            "dominant_label": self._activity_bucket_label(dominant_bucket),
+            "top_window": str(top_window or "未命名窗口"),
+            "top_window_duration": self._format_duration(top_window_seconds),
+            "top_app": str(top_app or ""),
+            "top_site": str(top_site or ""),
+            "top_scene": str(top_scene or ""),
+            "summary": " · ".join(summary_parts),
+            "primary_capture_source": str(primary_capture_source or ""),
+            "primary_capture_source_label": self._capture_source_label(primary_capture_source),
+            "source_mix_label": source_mix_label,
+            "continuation_label": continuation_label,
+            "work_ratio": f"{int(work_ratio_value)}%",
+            "switch_count": switch_count,
+            "switch_count_label": f"{switch_count} 次切换",
+            "entry_count": entry_count,
+            "entry_count_label": f"{entry_count} 段活动",
+            "window_count": len(window_seconds),
+            "window_count_label": f"{len(window_seconds)} 个窗口",
+            "idle_trimmed_seconds": idle_trimmed_seconds,
+            "idle_trimmed_time": self._format_duration(idle_trimmed_seconds),
+            "has_input_estimate": has_input_estimate,
+            "effective_note": effective_note,
+        }
+
+    def _build_activity_sessions(
+        self,
+        activity_history: list[dict[str, Any]] | None,
+        *,
+        day_key: str | None = None,
+        limit: int = 6,
+    ) -> dict[str, Any]:
+        valid_items: list[dict[str, Any]] = []
+        for item in activity_history or []:
+            if not isinstance(item, dict):
+                continue
+            duration = max(0.0, float(item.get("duration", 0) or 0))
+            start_time = float(item.get("start_time", 0) or 0)
+            if duration <= 0 or start_time <= 0:
+                continue
+            if day_key and self._get_activity_day_key(start_time) != day_key:
+                continue
+            valid_items.append(item)
+
+        if not valid_items:
+            return {
+                "items": [],
+                "count": 0,
+                "count_label": "0 段",
+                "focus_count": 0,
+                "focus_count_label": "0 段",
+                "fragmented_count": 0,
+                "fragmented_count_label": "0 段",
+                "total_time": "0分0秒",
+                "raw_total_time": "0分0秒",
+                "idle_trimmed_total_time": "0分0秒",
+                "longest_duration": "0分0秒",
+                "longest_state_label": "暂无",
+                "has_input_estimate": False,
+                "privacy_masked": self._plugin_bool("mask_activity_window_titles"),
+                "privacy_label": (
+                    "窗口标题已脱敏"
+                    if self._plugin_bool("mask_activity_window_titles")
+                    else "显示原始窗口标题"
+                ),
+            }
+
+        sorted_items = sorted(
+            valid_items,
+            key=lambda item: float(item.get("start_time", 0) or 0),
+        )
+        sessions: list[dict[str, Any]] = []
+        current_session: dict[str, Any] | None = None
+
+        for item in sorted_items:
+            start_time = float(item.get("start_time", 0) or 0)
+            end_time = float(item.get("end_time", 0) or 0)
+            raw_duration = max(0.0, float(item.get("raw_duration", item.get("duration", 0)) or 0))
+            duration = max(0.0, float(item.get("effective_duration", raw_duration) or raw_duration))
+            effective_end = end_time if end_time > 0 else start_time
+            bucket_key = self._activity_bucket_key(item.get("type", ""))
+            scene = str(item.get("scene", "") or "").strip()
+            window = str(item.get("window", "") or "").strip() or "未命名窗口"
+            app_name = str(item.get("app_name", "") or "").strip() or "未识别应用"
+            site_label = str(item.get("site_label", "") or "").strip()
+            capture_source = str(item.get("capture_source", "") or "screen_analysis").strip() or "screen_analysis"
+            idle_trimmed_seconds = max(0.0, float(item.get("idle_trimmed_seconds", 0) or 0))
+            has_input_estimate = bool(item.get("has_input_estimate", False))
+            marker = (bucket_key, scene, window)
+
+            gap_seconds = 0
+            split_session = current_session is None
+            if current_session is not None:
+                gap_seconds = max(0, int(start_time - float(current_session.get("end_time", 0) or 0)))
+                last_bucket = str(current_session.get("last_bucket", "") or "")
+                split_session = gap_seconds >= self.ACTIVITY_SESSION_GAP_SECONDS
+                if not split_session and {bucket_key, last_bucket} == {"work", "play"}:
+                    split_session = True
+                if (
+                    not split_session
+                    and int(current_session.get("active_seconds", 0) or 0) >= 90 * 60
+                    and gap_seconds >= 120
+                    and marker != current_session.get("last_marker")
+                ):
+                    split_session = True
+
+            if split_session:
+                if current_session is not None:
+                    digest = self._build_activity_session_digest(
+                        current_session,
+                        index=len(sessions),
+                    )
+                    if digest is not None:
+                        sessions.append(digest)
+                current_session = {
+                    "start_time": start_time,
+                    "end_time": effective_end,
+                    "active_seconds": 0.0,
+                    "raw_seconds": 0.0,
+                    "bucket_seconds": {"work": 0.0, "play": 0.0, "other": 0.0},
+                    "window_seconds": defaultdict(float),
+                    "app_seconds": defaultdict(float),
+                    "site_seconds": defaultdict(float),
+                    "source_seconds": defaultdict(float),
+                    "scene_seconds": defaultdict(float),
+                    "entry_count": 0,
+                    "switch_count": 0,
+                    "last_bucket": "",
+                    "last_marker": None,
+                    "gap_from_previous": gap_seconds if len(sessions) > 0 else 0,
+                    "idle_trimmed_seconds": 0.0,
+                    "has_input_estimate": False,
+                }
+
+            if current_session is None:
+                continue
+
+            current_session["start_time"] = min(float(current_session.get("start_time", start_time) or start_time), start_time)
+            current_session["end_time"] = max(float(current_session.get("end_time", effective_end) or effective_end), effective_end)
+            current_session["active_seconds"] = float(current_session.get("active_seconds", 0) or 0) + duration
+            current_session["raw_seconds"] = float(current_session.get("raw_seconds", 0) or 0) + raw_duration
+            current_session["bucket_seconds"][bucket_key] += duration
+            current_session["window_seconds"][window] += duration
+            current_session["app_seconds"][app_name] += duration
+            if site_label:
+                current_session["site_seconds"][site_label] += duration
+            if capture_source:
+                current_session["source_seconds"][capture_source] += duration
+            if scene:
+                current_session["scene_seconds"][scene] += duration
+            current_session["entry_count"] = int(current_session.get("entry_count", 0) or 0) + 1
+            current_session["idle_trimmed_seconds"] = float(
+                current_session.get("idle_trimmed_seconds", 0) or 0
+            ) + idle_trimmed_seconds
+            current_session["has_input_estimate"] = bool(
+                current_session.get("has_input_estimate", False) or has_input_estimate
+            )
+            if current_session.get("last_marker") is not None and current_session.get("last_marker") != marker:
+                current_session["switch_count"] = int(current_session.get("switch_count", 0) or 0) + 1
+            current_session["last_bucket"] = bucket_key
+            current_session["last_marker"] = marker
+
+        if current_session is not None:
+            digest = self._build_activity_session_digest(
+                current_session,
+                index=len(sessions),
+            )
+            if digest is not None:
+                sessions.append(digest)
+
+        total_time_seconds = sum(int(item.get("duration_seconds", 0) or 0) for item in sessions)
+        raw_total_time_seconds = sum(int(item.get("raw_duration_seconds", item.get("duration_seconds", 0)) or 0) for item in sessions)
+        idle_trimmed_total_seconds = sum(int(item.get("idle_trimmed_seconds", 0) or 0) for item in sessions)
+        focus_count = sum(
+            1
+            for item in sessions
+            if str(item.get("state_label", "") or "") == "深度专注"
+        )
+        fragmented_count = sum(
+            1
+            for item in sessions
+            if str(item.get("state_label", "") or "") == "频繁切换"
+        )
+        longest_session = max(
+            sessions,
+            key=lambda item: int(item.get("duration_seconds", 0) or 0),
+            default={},
+        )
+        display_items = sessions[-max(1, int(limit or 6)) :]
+
+        return {
+            "items": display_items,
+            "count": len(sessions),
+            "count_label": f"{len(sessions)} 段",
+            "focus_count": focus_count,
+            "focus_count_label": f"{focus_count} 段",
+            "fragmented_count": fragmented_count,
+            "fragmented_count_label": f"{fragmented_count} 段",
+            "total_time": self._format_duration(total_time_seconds),
+            "raw_total_time": self._format_duration(raw_total_time_seconds),
+            "idle_trimmed_total_time": self._format_duration(idle_trimmed_total_seconds),
+            "longest_duration": str(longest_session.get("duration", "0分0秒") or "0分0秒"),
+            "longest_state_label": str(longest_session.get("state_label", "暂无") or "暂无"),
+            "has_input_estimate": any(bool(item.get("has_input_estimate", False)) for item in sessions),
+            "privacy_masked": self._plugin_bool("mask_activity_window_titles"),
+            "privacy_label": (
+                "窗口标题已脱敏"
+                if self._plugin_bool("mask_activity_window_titles")
+                else "显示原始窗口标题"
+            ),
+        }
+
+    def _build_activity_pulse(
+        self,
+        *,
+        today_summary: dict[str, Any],
+        input_stats: dict[str, Any] | None,
+        current_activity: dict[str, Any] | None,
+        sessions: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        input_info = input_stats if isinstance(input_stats, dict) else {}
+        current_info = current_activity if isinstance(current_activity, dict) else {}
+        session_info = sessions if isinstance(sessions, dict) else {}
+
+        presence_status = str(input_info.get("presence_status", "disabled") or "disabled")
+        presence_label = str(input_info.get("presence_label", "未启用输入统计") or "未启用输入统计")
+        presence_detail = str(input_info.get("presence_detail", "") or "")
+        privacy_masked = self._plugin_bool("mask_activity_window_titles")
+
+        current_type = str(current_info.get("type", "") or "").strip()
+        current_scene = str(current_info.get("scene", "") or "").strip()
+        current_window = str(current_info.get("window", "") or "").strip() or "未命名窗口"
+        current_duration_seconds = max(0, int(current_info.get("duration", 0) or 0))
+        current_title = " · ".join([part for part in [current_type, current_scene] if part]) or "当前活动"
+
+        tone = ""
+        label = presence_label or "等待样本"
+        summary = "今天还没有形成足够的活动轨迹"
+        detail = presence_detail or "开始使用插件后，这里会把活动、输入和工作段自动串起来。"
+
+        if current_info:
+            if current_type == "工作" and presence_status == "active":
+                label = "专注中" if current_duration_seconds >= 15 * 60 else "处理中"
+                tone = "good"
+                summary = f"{current_title} 已持续 {self._format_duration(current_duration_seconds)}"
+                detail = f"当前主要停留在《{current_window}》，{presence_detail or '最近仍有键鼠输入。'}"
+            elif current_type == "摸鱼" and presence_status == "active":
+                label = "放松中"
+                tone = "warm"
+                summary = f"{current_title} 已持续 {self._format_duration(current_duration_seconds)}"
+                detail = f"当前停留在《{current_window}》，{presence_detail or '最近仍有键鼠输入。'}"
+            elif presence_status in {"idle", "away"}:
+                label = "挂起中" if presence_status == "idle" else "长时间离开"
+                tone = "warm" if presence_status == "idle" else "muted"
+                summary = f"{current_title} 还停留在前台，但最近没有新的输入"
+                detail = f"当前窗口《{current_window}》，{presence_detail or '更像是暂时挂着没动。'}"
+            else:
+                label = "记录中"
+                summary = f"{current_title} 已记录 {self._format_duration(current_duration_seconds)}"
+                detail = presence_detail or "窗口活动已经在持续累计。"
+        elif int(today_summary.get("total_seconds", 0) or 0) > 0:
+            if presence_status == "active":
+                label = "刚有活动"
+                tone = "good"
+            elif presence_status == "idle":
+                label = "暂时离开"
+                tone = "warm"
+            elif presence_status == "away":
+                label = "等待回来"
+                tone = "muted"
+            summary = (
+                f"今天已累计 {today_summary.get('total_time', '0分0秒')}，形成 {session_info.get('count_label', '0 段')} 工作轨迹"
+            )
+            detail = presence_detail or "当前没有足够长的前台活动片段，但今天的轨迹已经开始成型。"
+
+        meta = [
+            f"输入状态：{presence_label}",
+            f"今日专注：{today_summary.get('focus_session_label', '0 段')}",
+            f"工作段：{session_info.get('count_label', '0 段')}",
+            f"隐私：{'窗口脱敏中' if privacy_masked else '显示原始标题'}",
+        ]
+        if today_summary.get("has_input_estimate"):
+            meta.insert(2, f"有效工作：{today_summary.get('effective_work_time', '0分0秒')}")
+        if current_info:
+            meta.insert(1, f"当前窗口：{current_window}")
+
+        return {
+            "label": label,
+            "summary": summary,
+            "detail": detail,
+            "tone": tone,
+            "meta": meta,
+            "presence_label": presence_label,
+            "presence_status": presence_status,
+            "privacy_masked": privacy_masked,
+        }
+
+    def _build_activity_workspace_story(
+        self,
+        activity_history: list[dict[str, Any]] | None,
+        *,
+        today_summary: dict[str, Any] | None = None,
+        input_stats: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        today_key = datetime.now().date().isoformat()
+        effective_today_summary = (
+            today_summary
+            if isinstance(today_summary, dict)
+            else self._summarize_activity_period(
+                [
+                    item
+                    for item in (activity_history or [])
+                    if self._get_activity_day_key(item.get("start_time", 0)) == today_key
+                ]
+            )
+        )
+        effective_input_stats = input_stats if isinstance(input_stats, dict) else {}
+        current_activity = self._normalize_activity_item_for_display(
+            self._safe_plugin_call("_build_current_activity_snapshot", None)
+        )
+        sessions = self._build_activity_sessions(
+            activity_history,
+            day_key=today_key,
+            limit=6,
+        )
+        pulse = self._build_activity_pulse(
+            today_summary=effective_today_summary,
+            input_stats=effective_input_stats,
+            current_activity=current_activity,
+            sessions=sessions,
+        )
+        return {
+            "pulse": pulse,
+            "sessions": sessions,
+        }
+
+    def _build_activity_surface_rows(
+        self,
+        groups: dict[str, dict[str, Any]],
+        *,
+        total_seconds: float,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for label, data in sorted(
+            groups.items(),
+            key=lambda item: (
+                float(item[1].get("duration", 0) or 0),
+                int(item[1].get("sessions", 0) or 0),
+                float(item[1].get("last_seen", 0) or 0),
+            ),
+            reverse=True,
+        )[: max(1, int(limit or self.ACTIVITY_SURFACE_LIMIT))]:
+            dominant_bucket = max(
+                ("work", "play", "other"),
+                key=lambda key: float(data.get(key, 0) or 0),
+            )
+            duration_seconds = int(data.get("duration", 0) or 0)
+            idle_trimmed = int(data.get("idle_trimmed_seconds", 0) or 0)
+            rows.append(
+                {
+                    "label": str(label or "未命名"),
+                    "duration": self._format_duration(duration_seconds),
+                    "duration_seconds": duration_seconds,
+                    "share": (
+                        f"{round((duration_seconds / total_seconds) * 100)}%"
+                        if total_seconds > 0
+                        else "0%"
+                    ),
+                    "sessions": int(data.get("sessions", 0) or 0),
+                    "type": self._activity_bucket_label(dominant_bucket),
+                    "last_seen": self._format_clock(data.get("last_seen", 0)),
+                    "domain": str(data.get("domain", "") or ""),
+                    "idle_trimmed_time": self._format_duration(idle_trimmed),
+                }
+            )
+        return rows
+
+    def _build_activity_surface_trail(
+        self,
+        activity_history: list[dict[str, Any]] | None,
+        *,
+        day_key: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        valid_items: list[dict[str, Any]] = []
+        for item in activity_history or []:
+            if not isinstance(item, dict):
+                continue
+            raw_duration = max(0.0, float(item.get("raw_duration", item.get("duration", 0)) or 0))
+            start_time = float(item.get("start_time", 0) or 0)
+            if raw_duration <= 0 or start_time <= 0:
+                continue
+            if day_key and self._get_activity_day_key(start_time) != day_key:
+                continue
+            valid_items.append(item)
+
+        if not valid_items:
+            return {
+                "summary": {
+                    "app_count": 0,
+                    "app_count_label": "0 个应用",
+                    "site_count": 0,
+                    "site_count_label": "0 个站点",
+                    "effective_time": "0分0秒",
+                    "idle_trimmed_time": "0分0秒",
+                    "estimate_enabled": False,
+                    "estimate_label": "未启用空闲扣减",
+                    "top_app": "",
+                    "top_site": "",
+                },
+                "apps": [],
+                "sites": [],
+            }
+
+        app_groups: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {
+                "duration": 0.0,
+                "sessions": 0,
+                "last_seen": 0.0,
+                "work": 0.0,
+                "play": 0.0,
+                "other": 0.0,
+                "idle_trimmed_seconds": 0.0,
+                "domain": "",
+            }
+        )
+        site_groups: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {
+                "duration": 0.0,
+                "sessions": 0,
+                "last_seen": 0.0,
+                "work": 0.0,
+                "play": 0.0,
+                "other": 0.0,
+                "idle_trimmed_seconds": 0.0,
+                "domain": "",
+            }
+        )
+        measured_total_seconds = 0.0
+        idle_trimmed_total_seconds = 0.0
+        estimate_enabled = False
+
+        for item in valid_items:
+            raw_duration = max(0.0, float(item.get("raw_duration", item.get("duration", 0)) or 0))
+            bucket_key = self._activity_bucket_key(item.get("type", ""))
+            effective_duration = max(
+                0.0,
+                float(item.get("effective_duration", raw_duration) or raw_duration),
+            )
+            measure_duration = effective_duration if bucket_key == "work" else raw_duration
+            idle_trimmed = max(0.0, float(item.get("idle_trimmed_seconds", 0) or 0))
+            last_seen = float(item.get("end_time", 0) or item.get("start_time", 0) or 0)
+
+            measured_total_seconds += measure_duration
+            idle_trimmed_total_seconds += idle_trimmed
+            estimate_enabled = bool(estimate_enabled or item.get("has_input_estimate", False))
+
+            app_label = str(item.get("app_name", "") or "").strip() or "未识别应用"
+            app_bucket = app_groups[app_label]
+            app_bucket["duration"] += measure_duration
+            app_bucket["sessions"] += 1
+            app_bucket["last_seen"] = max(float(app_bucket["last_seen"] or 0), last_seen)
+            app_bucket[bucket_key] += measure_duration
+            app_bucket["idle_trimmed_seconds"] += idle_trimmed
+
+            site_label = str(item.get("site_label", "") or "").strip()
+            if site_label:
+                site_bucket = site_groups[site_label]
+                site_bucket["duration"] += measure_duration
+                site_bucket["sessions"] += 1
+                site_bucket["last_seen"] = max(float(site_bucket["last_seen"] or 0), last_seen)
+                site_bucket[bucket_key] += measure_duration
+                site_bucket["idle_trimmed_seconds"] += idle_trimmed
+                site_bucket["domain"] = str(item.get("site_domain", "") or "").strip()
+
+        app_rows = self._build_activity_surface_rows(
+            app_groups,
+            total_seconds=measured_total_seconds,
+            limit=limit or self.ACTIVITY_SURFACE_LIMIT,
+        )
+        site_rows = self._build_activity_surface_rows(
+            site_groups,
+            total_seconds=measured_total_seconds,
+            limit=limit or self.ACTIVITY_SURFACE_LIMIT,
+        )
+
+        return {
+            "summary": {
+                "app_count": len(app_groups),
+                "app_count_label": f"{len(app_groups)} 个应用",
+                "site_count": len(site_groups),
+                "site_count_label": f"{len(site_groups)} 个站点",
+                "effective_time": self._format_duration(measured_total_seconds),
+                "idle_trimmed_time": self._format_duration(idle_trimmed_total_seconds),
+                "estimate_enabled": estimate_enabled,
+                "estimate_label": (
+                    "已按本地输入扣除了长时间空闲"
+                    if estimate_enabled
+                    else "当前按原始窗口停留时长统计"
+                ),
+                "top_app": str(app_rows[0].get("label", "") if app_rows else ""),
+                "top_site": str(site_rows[0].get("label", "") if site_rows else ""),
+            },
+            "apps": app_rows,
+            "sites": site_rows,
+        }
+
+    def _summarize_activity_period(
+        self,
+        activity_history: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        valid_items: list[dict[str, Any]] = []
+        for item in activity_history or []:
+            if not isinstance(item, dict):
+                continue
+            duration = max(0.0, float(item.get("duration", 0) or 0))
+            if duration <= 0:
+                continue
+            valid_items.append(item)
+
+        if not valid_items:
+            return self._build_empty_activity_period()
+
+        sorted_items = sorted(
+            valid_items,
+            key=lambda x: float(x.get("start_time", 0) or 0),
+        )
+        totals = {"work": 0.0, "play": 0.0, "other": 0.0}
+        display_totals = {"work": 0.0, "play": 0.0, "other": 0.0}
+        unique_windows: set[str] = set()
+        switch_count = 0
+        focus_session_count = 0
+        effective_work_seconds = 0.0
+        idle_trimmed_seconds = 0.0
+        has_input_estimate = False
+        longest_focus: dict[str, Any] = {
+            "seconds": 0.0,
+            "window": "",
+            "scene": "",
+        }
+        earliest_start = 0.0
+        latest_end = 0.0
+        previous_marker: tuple[str, str, str] | None = None
+        window_groups: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {
+                "duration": 0.0,
+                "sessions": 0,
+                "last_seen": 0.0,
+                "work": 0.0,
+                "play": 0.0,
+                "other": 0.0,
+            }
+        )
+
+        for item in sorted_items:
+            raw_duration = max(0.0, float(item.get("raw_duration", item.get("duration", 0)) or 0))
+            effective_duration = max(
+                0.0,
+                float(item.get("effective_duration", raw_duration) or raw_duration),
+            )
+            start_ts = float(item.get("start_time", 0) or 0)
+            end_ts = float(item.get("end_time", 0) or 0)
+            effective_end = end_ts if end_ts > 0 else start_ts
+            activity_type = str(item.get("type", "") or "").strip()
+            scene = str(item.get("scene", "") or "").strip()
+            window = str(item.get("window", "") or "").strip() or "未命名窗口"
+            bucket_key = self._activity_bucket_key(activity_type)
+            measure_duration = effective_duration if bucket_key == "work" else raw_duration
+
+            totals[bucket_key] += raw_duration
+            display_totals[bucket_key] += measure_duration
+            unique_windows.add(window)
+
+            if earliest_start <= 0 or (start_ts > 0 and start_ts < earliest_start):
+                earliest_start = start_ts
+            if effective_end > latest_end:
+                latest_end = effective_end
+
+            marker = (bucket_key, scene, window)
+            if previous_marker is not None and marker != previous_marker:
+                switch_count += 1
+            previous_marker = marker
+
+            if bucket_key == "work":
+                effective_work_seconds += effective_duration
+                idle_trimmed_seconds += max(
+                    0.0,
+                    float(item.get("idle_trimmed_seconds", raw_duration - effective_duration) or 0),
+                )
+                has_input_estimate = bool(
+                    has_input_estimate or item.get("has_input_estimate", False)
+                )
+                if effective_duration >= self.FOCUS_SESSION_THRESHOLD_SECONDS:
+                    focus_session_count += 1
+                if effective_duration > float(longest_focus["seconds"] or 0):
+                    longest_focus = {
+                        "seconds": effective_duration,
+                        "window": window,
+                        "scene": scene,
+                    }
+
+            window_bucket = window_groups[window]
+            window_bucket["duration"] += measure_duration
+            window_bucket["sessions"] += 1
+            window_bucket["last_seen"] = max(
+                float(window_bucket["last_seen"] or 0),
+                float(effective_end or 0),
+            )
+            window_bucket[bucket_key] += measure_duration
+
+        total_seconds = sum(totals.values())
+        display_total_seconds = sum(display_totals.values())
+        active_span_seconds = max(0.0, latest_end - earliest_start) if earliest_start > 0 and latest_end > 0 else 0.0
+
+        top_windows = []
+        for window_name, data in sorted(
+            window_groups.items(),
+            key=lambda item: (
+                float(item[1]["duration"] or 0),
+                int(item[1]["sessions"] or 0),
+                float(item[1]["last_seen"] or 0),
+            ),
+            reverse=True,
+        )[: self.TOP_WINDOW_LIMIT]:
+            dominant_bucket = max(
+                ("work", "play", "other"),
+                key=lambda key: float(data.get(key, 0) or 0),
+            )
+            top_windows.append(
+                {
+                    "window": window_name,
+                    "duration": self._format_duration(data["duration"]),
+                    "duration_seconds": int(data["duration"] or 0),
+                    "sessions": int(data["sessions"] or 0),
+                    "share": (
+                        f"{round((float(data['duration'] or 0) / display_total_seconds) * 100)}%"
+                        if display_total_seconds > 0
+                        else "0%"
+                    ),
+                    "type": self._activity_bucket_label(dominant_bucket),
+                }
+            )
+
+        top_window = dict(top_windows[0]) if top_windows else {}
+
+        return {
+            "work_time": self._format_duration(totals["work"]),
+            "play_time": self._format_duration(totals["play"]),
+            "other_time": self._format_duration(totals["other"]),
+            "total_time": self._format_duration(total_seconds),
+            "display_total_time": self._format_duration(display_total_seconds),
+            "work_seconds": int(totals["work"]),
+            "play_seconds": int(totals["play"]),
+            "other_seconds": int(totals["other"]),
+            "total_seconds": int(total_seconds),
+            "display_total_seconds": int(display_total_seconds),
+            "effective_work_seconds": int(effective_work_seconds),
+            "effective_work_time": self._format_duration(effective_work_seconds),
+            "idle_trimmed_seconds": int(idle_trimmed_seconds),
+            "idle_trimmed_time": self._format_duration(idle_trimmed_seconds),
+            "has_input_estimate": has_input_estimate,
+            "session_count": len(sorted_items),
+            "focus_session_count": int(focus_session_count),
+            "focus_session_label": f"{int(focus_session_count)} 段",
+            "switch_count": int(switch_count),
+            "switch_count_label": f"{int(switch_count)} 次",
+            "unique_window_count": len(unique_windows),
+            "work_ratio": (
+                f"{round((totals['work'] / total_seconds) * 100)}%"
+                if total_seconds > 0
+                else "0%"
+            ),
+            "effective_work_ratio": (
+                f"{round((effective_work_seconds / display_total_seconds) * 100)}%"
+                if display_total_seconds > 0
+                else "0%"
+            ),
+            "start_clock": self._format_clock(earliest_start),
+            "end_clock": self._format_clock(latest_end),
+            "active_span_seconds": int(active_span_seconds),
+            "active_span_time": self._format_duration(active_span_seconds),
+            "longest_focus_seconds": int(longest_focus["seconds"] or 0),
+            "longest_focus_time": self._format_duration(longest_focus["seconds"]),
+            "longest_focus_window": str(longest_focus["window"] or ""),
+            "longest_focus_scene": str(longest_focus["scene"] or ""),
+            "top_window": top_window,
+            "top_windows": top_windows,
+        }
+
+    def _build_activity_trend(
+        self,
+        activity_history: list[dict[str, Any]] | None,
+        *,
+        days: int | None = None,
+    ) -> list[dict[str, Any]]:
+        trend_days = max(1, int(days or self.ACTIVITY_TREND_DAYS))
+        today = datetime.now().date()
+        day_list = [
+            today - timedelta(days=offset)
+            for offset in reversed(range(trend_days))
+        ]
+        buckets: dict[str, dict[str, Any]] = {
+            day.isoformat(): {
+                "date": day.isoformat(),
+                "raw_work_seconds": 0,
+                "work_seconds": 0,
+                "play_seconds": 0,
+                "other_seconds": 0,
+                "effective_work_seconds": 0,
+                "idle_trimmed_seconds": 0,
+                "display_total_seconds": 0,
+                "has_input_estimate": False,
+                "session_count": 0,
+            }
+            for day in day_list
+        }
+
+        for item in activity_history or []:
+            if not isinstance(item, dict):
+                continue
+            day_key = self._get_activity_day_key(item.get("start_time", 0))
+            if not day_key or day_key not in buckets:
+                continue
+            raw_duration = max(
+                0.0,
+                float(item.get("raw_duration", item.get("duration", 0)) or 0),
+            )
+            if raw_duration <= 0:
+                continue
+            bucket_key = self._activity_bucket_key(item.get("type", ""))
+            effective_duration = max(
+                0.0,
+                float(item.get("effective_duration", raw_duration) or raw_duration),
+            )
+            measure_duration = effective_duration if bucket_key == "work" else raw_duration
+            day_bucket = buckets[day_key]
+            if bucket_key == "work":
+                day_bucket["raw_work_seconds"] += int(raw_duration)
+                day_bucket["effective_work_seconds"] += int(effective_duration)
+                day_bucket["idle_trimmed_seconds"] += int(
+                    max(
+                        0.0,
+                        float(
+                            item.get(
+                                "idle_trimmed_seconds",
+                                raw_duration - effective_duration,
+                            )
+                            or 0
+                        ),
+                    )
+                )
+                day_bucket["has_input_estimate"] = bool(
+                    day_bucket["has_input_estimate"]
+                    or item.get("has_input_estimate", False)
+                )
+            day_bucket[f"{bucket_key}_seconds"] += int(measure_duration)
+            day_bucket["display_total_seconds"] += int(measure_duration)
+            day_bucket["session_count"] += 1
+
+        rows: list[dict[str, Any]] = []
+        yesterday = today - timedelta(days=1)
+        for day in day_list:
+            day_key = day.isoformat()
+            bucket = buckets[day_key]
+            raw_total_seconds = (
+                int(bucket["raw_work_seconds"])
+                + int(bucket["play_seconds"])
+                + int(bucket["other_seconds"])
+            )
+            display_total_seconds = (
+                int(bucket["display_total_seconds"])
+                if int(bucket["display_total_seconds"] or 0) > 0
+                else raw_total_seconds
+            )
+            has_input_estimate = bool(bucket["has_input_estimate"])
+            if day == today:
+                label = "今天"
+            elif day == yesterday:
+                label = "昨天"
+            else:
+                label = day.strftime("%m-%d")
+            rows.append(
+                {
+                    "date": day_key,
+                    "label": label,
+                    "work_seconds": int(bucket["work_seconds"]),
+                    "raw_work_seconds": int(bucket["raw_work_seconds"]),
+                    "play_seconds": int(bucket["play_seconds"]),
+                    "other_seconds": int(bucket["other_seconds"]),
+                    "total_seconds": int(raw_total_seconds),
+                    "total_time": self._format_duration(
+                        display_total_seconds if has_input_estimate else raw_total_seconds
+                    ),
+                    "raw_total_seconds": int(raw_total_seconds),
+                    "raw_total_time": self._format_duration(raw_total_seconds),
+                    "display_total_seconds": int(display_total_seconds),
+                    "display_total_time": self._format_duration(display_total_seconds),
+                    "effective_work_seconds": int(bucket["effective_work_seconds"]),
+                    "effective_work_time": self._format_duration(
+                        bucket["effective_work_seconds"]
+                    ),
+                    "idle_trimmed_seconds": int(bucket["idle_trimmed_seconds"]),
+                    "idle_trimmed_time": self._format_duration(
+                        bucket["idle_trimmed_seconds"]
+                    ),
+                    "has_input_estimate": has_input_estimate,
+                    "work_ratio": (
+                        f"{round((int(bucket['raw_work_seconds']) / raw_total_seconds) * 100)}%"
+                        if raw_total_seconds > 0
+                        else "0%"
+                    ),
+                    "effective_work_ratio": (
+                        f"{round((int(bucket['effective_work_seconds']) / display_total_seconds) * 100)}%"
+                        if display_total_seconds > 0
+                        else "0%"
+                    ),
+                    "session_count": int(bucket["session_count"]),
+                }
+            )
+        return rows
+
+    def _summarize_activity_capture_sources(
+        self,
+        activity_history: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        source_seconds: dict[str, float] = defaultdict(float)
+        source_count: dict[str, int] = defaultdict(int)
+        total_seconds = 0.0
+
+        for item in activity_history or []:
+            if not isinstance(item, dict):
+                continue
+            source_key = str(item.get("capture_source", "") or "screen_analysis").strip() or "screen_analysis"
+            duration = max(
+                0.0,
+                float(item.get("effective_duration", item.get("duration", 0)) or 0),
+            )
+            if duration <= 0:
+                continue
+            source_seconds[source_key] += duration
+            source_count[source_key] += 1
+            total_seconds += duration
+
+        rows = [
+            {
+                "key": source_key,
+                "label": self._capture_source_label(source_key),
+                "duration_seconds": int(seconds),
+                "duration": self._format_duration(seconds),
+                "count": int(source_count.get(source_key, 0) or 0),
+                "share": (
+                    f"{round((seconds / total_seconds) * 100)}%"
+                    if total_seconds > 0
+                    else "0%"
+                ),
+            }
+            for source_key, seconds in sorted(
+                source_seconds.items(),
+                key=lambda item: float(item[1] or 0),
+                reverse=True,
+            )
+        ]
+
+        if not rows:
+            return {
+                "items": [],
+                "summary": "当前还没有足够的轨迹样本来说明来源分布。",
+            }
+
+        primary = rows[0]
+        if len(rows) == 1:
+            summary = f"当前轨迹主要来自 {primary['label']}，累计 {primary['duration']}。"
+        else:
+            summary = (
+                f"当前是混合轨迹，主要来源为 {primary['label']}（{primary['share']}），"
+                f"其余来源会一起补充回顾视角。"
+            )
+        return {"items": rows, "summary": summary}
+
+    def _build_activity_review(
+        self,
+        *,
+        today_summary: dict[str, Any],
+        total_summary: dict[str, Any],
+        yesterday_summary: dict[str, Any],
+        activity_history: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        use_today = int(today_summary.get("total_seconds", 0) or 0) > 0
+        active_summary = today_summary if use_today else total_summary
+        range_label = "今天" if use_today else "累计"
+        source_summary = self._summarize_activity_capture_sources(activity_history)
+
+        longest_focus_value = active_summary.get("longest_focus_time", "0分0秒")
+        longest_focus_detail = "还没有形成足够长的工作片段"
+        if int(active_summary.get("longest_focus_seconds", 0) or 0) > 0:
+            detail_parts = []
+            longest_focus_window = str(active_summary.get("longest_focus_window", "") or "").strip()
+            longest_focus_scene = str(active_summary.get("longest_focus_scene", "") or "").strip()
+            if longest_focus_window:
+                detail_parts.append(longest_focus_window)
+            if longest_focus_scene:
+                detail_parts.append(longest_focus_scene)
+            longest_focus_detail = " · ".join(detail_parts) if detail_parts else "来自最近的工作片段"
+
+        top_window = active_summary.get("top_window", {}) if isinstance(active_summary.get("top_window", {}), dict) else {}
+        top_window_name = str(top_window.get("window", "") or "").strip() or "暂无"
+        top_window_detail = (
+            f"累计 {top_window.get('duration', '0分0秒')} · {top_window.get('share', '0%')}"
+            if top_window
+            else "还没有聚焦出明显主力窗口"
+        )
+        effective_work_detail = (
+            f"已扣除约 {active_summary.get('idle_trimmed_time', '0分0秒')} 的长时间空闲"
+            if active_summary.get("has_input_estimate")
+            else "当前仍按原始窗口停留时长统计"
+        )
+
+        summary_cards = [
+            {
+                "label": "最长专注",
+                "value": longest_focus_value,
+                "detail": longest_focus_detail,
+                "tone": "good",
+            },
+            {
+                "label": "专注段数",
+                "value": active_summary.get("focus_session_label", "0 段"),
+                "detail": f"单段至少 {self.FOCUS_SESSION_THRESHOLD_SECONDS // 60} 分钟",
+                "tone": "warm",
+            },
+            {
+                "label": "上下文切换",
+                "value": active_summary.get("switch_count_label", "0 次"),
+                "detail": f"{range_label}共 {active_summary.get('session_count', 0)} 段活动",
+                "tone": "",
+            },
+            {
+                "label": "有效工作",
+                "value": active_summary.get("effective_work_time", active_summary.get("work_time", "0分0秒")),
+                "detail": effective_work_detail,
+                "tone": "good" if active_summary.get("has_input_estimate") else "",
+            },
+            {
+                "label": "主力窗口",
+                "value": top_window_name,
+                "detail": top_window_detail,
+                "tone": "",
+            },
+        ]
+
+        insights: list[str] = []
+        if int(today_summary.get("total_seconds", 0) or 0) <= 0:
+            insights.append("今天还没有形成足够活动样本，先让插件继续积累一会儿数据。")
+        else:
+            insights.append(
+                f"今天累计记录 {today_summary.get('total_time', '0分0秒')}，工作占比 {today_summary.get('work_ratio', '0%')}。"
+            )
+            if today_summary.get("has_input_estimate"):
+                insights.append(
+                    f"按本地输入估算后，今天的有效工作时间约为 {today_summary.get('effective_work_time', '0分0秒')}，扣除了 {today_summary.get('idle_trimmed_time', '0分0秒')} 的长时间空闲。"
+                )
+            if int(today_summary.get("longest_focus_seconds", 0) or 0) > 0:
+                focus_window = str(today_summary.get("longest_focus_window", "") or "").strip() or "当前主任务"
+                insights.append(
+                    f"最久的一段专注发生在《{focus_window}》，持续 {today_summary.get('longest_focus_time', '0分0秒')}。"
+                )
+            if str(today_summary.get("start_clock", "") or "").strip() and str(today_summary.get("end_clock", "") or "").strip():
+                insights.append(
+                    f"今天的活跃跨度是 {today_summary.get('active_span_time', '0分0秒')}，从 {today_summary.get('start_clock')} 到 {today_summary.get('end_clock')}。"
+                )
+            if int(today_summary.get("switch_count", 0) or 0) > 0:
+                insights.append(
+                    f"今天发生了 {today_summary.get('switch_count', 0)} 次上下文切换，当前节奏偏 {'稳定' if int(today_summary.get('switch_count', 0) or 0) <= 8 else '碎片化'}。"
+                )
+            delta_work_seconds = int(today_summary.get("work_seconds", 0) or 0) - int(yesterday_summary.get("work_seconds", 0) or 0)
+            if int(yesterday_summary.get("total_seconds", 0) or 0) > 0:
+                if delta_work_seconds > 0:
+                    insights.append(
+                        f"和昨天相比，今天多投入了 {self._format_duration(delta_work_seconds)} 工作时间。"
+                    )
+                elif delta_work_seconds < 0:
+                    insights.append(
+                        f"和昨天相比，今天少投入了 {self._format_duration(abs(delta_work_seconds))} 工作时间。"
+                    )
+                else:
+                    insights.append("和昨天相比，今天的工作投入时长基本持平。")
+
+        methodology = [
+            {
+                "title": "有效工作口径",
+                "detail": (
+                    f"当前已按本地输入估算，把长时间无键鼠输入的空闲从工作时长里扣除了 {active_summary.get('idle_trimmed_time', '0分0秒')}。"
+                    if active_summary.get("has_input_estimate")
+                    else "当前还没有使用本地输入统计修正工作时长，因此工作时间仍按窗口停留时长计算。"
+                ),
+            },
+            {
+                "title": "工作段怎么聚合",
+                "detail": f"相邻活动间隔小于 {self.ACTIVITY_SESSION_GAP_SECONDS // 60} 分钟且节奏连续时，会被合并成同一段工作轨迹；明显跨到娱乐或切换过久时会拆成新段。",
+            },
+            {
+                "title": "轨迹来源",
+                "detail": str(source_summary.get("summary", "") or "当前还没有足够的轨迹样本来说明来源分布。"),
+            },
+        ]
+
+        return {
+            "range_label": range_label,
+            "summary_cards": summary_cards,
+            "insights": insights[:4],
+            "methodology": methodology,
+            "capture_sources": source_summary.get("items", []),
+            "top_windows": active_summary.get("top_windows", []),
+            "trend": self._build_activity_trend(activity_history, days=self.ACTIVITY_TREND_DAYS),
+        }
 
     @staticmethod
     def _build_custom_dashboard_range(start_date: str, end_date: str) -> dict[str, Any] | None:
@@ -974,8 +2656,8 @@ class WebServer:
         """Return basic config metadata."""
         try:
             return self._ok({
-                "version": "2.8.1",
-                "plugin_version": "2.8.1"
+                "version": self.APP_VERSION,
+                "plugin_version": self.APP_VERSION
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -1137,6 +2819,22 @@ class WebServer:
                 ],
             },
             {
+                "id": "analytics",
+                "title": "本地统计",
+                "description": "把活动回顾、工作轨迹、输入空闲状态和轻量隐私保护放到同一套体验里。",
+                "fields": [
+                    "enable_background_activity_tracking",
+                    "background_activity_tracking_interval",
+                    "enable_input_stats",
+                    "input_stats_flush_interval",
+                    "enable_away_auto_pause",
+                    "away_auto_pause_threshold",
+                    "away_long_notice_threshold",
+                    "mask_activity_window_titles",
+                    "activity_recognition_rules",
+                ],
+            },
+            {
                 "id": "webui",
                 "title": "WebUI",
                 "description": "配置 WebUI 的访问地址、密码和外部 API 权限。",
@@ -1230,6 +2928,80 @@ class WebServer:
                     "min": 2,
                     "max": 300,
                 },
+                "enable_input_stats": {
+                    "description": "启用本地输入统计",
+                    "type": "bool",
+                    "hint": "开启后会尝试监听全局键盘和鼠标输入，用于生成更像 KeyStats 的活动回顾。默认依赖已随基础安装提供，但系统可能仍需授予输入监听权限。",
+                    "default": False,
+                },
+                "enable_background_activity_tracking": {
+                    "description": "启用独立活动轨迹采集",
+                    "type": "bool",
+                    "hint": "开启后，即使没有启动自动观察，也会按固定间隔记录当前活动窗口，并尽量拆出应用 / 网站 / 页面轨迹。自动观察运行中会继续优先使用识屏轨迹。",
+                    "default": False,
+                },
+                "background_activity_tracking_interval": {
+                    "description": "独立轨迹采样间隔",
+                    "type": "int",
+                    "hint": "后台每隔多少秒采样一次当前活动窗口。值越小越细，值越大越省资源。",
+                    "default": 15,
+                    "min": 5,
+                    "max": 3600,
+                    "condition": {
+                        "enable_background_activity_tracking": True,
+                    },
+                },
+                "input_stats_flush_interval": {
+                    "description": "输入统计落盘间隔",
+                    "type": "int",
+                    "hint": "输入统计写入本地 JSON 的间隔秒数。值越小越实时，值越大越省 IO。",
+                    "default": 60,
+                    "min": 10,
+                    "max": 3600,
+                },
+                "enable_away_auto_pause": {
+                    "description": "离开电脑时自动挂起观察",
+                    "type": "bool",
+                    "hint": "仅在启用本地输入统计后生效。非观影场景下，如果较长时间没有键鼠输入，就先暂停自动观察；检测到你回来后再自动恢复。",
+                    "default": False,
+                    "condition": {"enable_input_stats": True},
+                },
+                "away_auto_pause_threshold": {
+                    "description": "自动挂起阈值",
+                    "type": "int",
+                    "hint": "连续多久没有输入后，认为用户已经暂时离开电脑前并挂起自动观察。",
+                    "default": 1200,
+                    "min": 300,
+                    "max": 14400,
+                    "condition": {
+                        "enable_input_stats": True,
+                        "enable_away_auto_pause": True,
+                    },
+                },
+                "away_long_notice_threshold": {
+                    "description": "长时间离开提醒阈值",
+                    "type": "int",
+                    "hint": "离开时间超过这个阈值时，只额外发一次轻量提醒文案，然后继续安静等待。",
+                    "default": 3600,
+                    "min": 600,
+                    "max": 86400,
+                    "condition": {
+                        "enable_input_stats": True,
+                        "enable_away_auto_pause": True,
+                    },
+                },
+                "mask_activity_window_titles": {
+                    "description": "活动页窗口标题脱敏",
+                    "type": "bool",
+                    "hint": "开启后，活动统计、主力窗口和工作轨迹里的窗口标题会统一脱敏，更接近 Work_Review 的隐私感知使用体验。",
+                    "default": False,
+                },
+                "activity_recognition_rules": {
+                    "description": "活动识别自定义规则",
+                    "type": "text",
+                    "hint": "每行一条，格式为 app|关键词|显示名 或 site|关键词/域名|显示名。支持 # 注释，例如：app|cursor.exe|Cursor 或 site|docs.company.com|公司文档。",
+                    "default": "",
+                },
             }
         )
         values.update(
@@ -1244,6 +3016,35 @@ class WebServer:
                 "window_companion_check_interval": int(
                     getattr(self.plugin, "window_companion_check_interval", 5) or 5
                 ),
+                "enable_input_stats": bool(
+                    getattr(self.plugin, "enable_input_stats", False)
+                ),
+                "enable_background_activity_tracking": bool(
+                    getattr(self.plugin, "enable_background_activity_tracking", False)
+                ),
+                "background_activity_tracking_interval": int(
+                    getattr(self.plugin, "background_activity_tracking_interval", 15)
+                    or 15
+                ),
+                "input_stats_flush_interval": int(
+                    getattr(self.plugin, "input_stats_flush_interval", 60) or 60
+                ),
+                "enable_away_auto_pause": bool(
+                    getattr(self.plugin, "enable_away_auto_pause", False)
+                ),
+                "away_auto_pause_threshold": int(
+                    getattr(self.plugin, "away_auto_pause_threshold", 1200) or 1200
+                ),
+                "away_long_notice_threshold": int(
+                    getattr(self.plugin, "away_long_notice_threshold", 3600) or 3600
+                ),
+                "mask_activity_window_titles": bool(
+                    getattr(self.plugin, "mask_activity_window_titles", False)
+                ),
+                "activity_recognition_rules": getattr(
+                    self.plugin, "activity_recognition_rules", ""
+                )
+                or "",
             }
         )
         return {"schema": schema, "values": values, "groups": groups}
@@ -1320,17 +3121,43 @@ class WebServer:
         if not normalized_updates:
             return self._err("No valid settings provided", 400)
 
-        self.plugin._update_config_from_dict(normalized_updates)
-        return self._ok({"settings": self._build_settings_payload()})
+        applied_keys = sorted(normalized_updates.keys())
+        if "webui" in normalized_updates and isinstance(normalized_updates["webui"], dict):
+            applied_keys = [
+                *(key for key in applied_keys if key != "webui"),
+                *(
+                    f"webui.{key}"
+                    for key in sorted(normalized_updates["webui"].keys())
+                ),
+            ]
+
+        try:
+            self.plugin._update_config_from_dict(normalized_updates)
+            return self._ok(
+                {
+                    "settings": self._build_settings_payload(),
+                    "meta": {
+                        "applied_keys": applied_keys,
+                        "applied_count": len(applied_keys),
+                        "webui_updated": any(
+                            str(key).startswith("webui.") for key in applied_keys
+                        ),
+                    },
+                }
+            )
+        except Exception as e:
+            logger.error(f"更新 WebUI 配置失败: {e}", exc_info=True)
+            return self._err(str(e))
 
     async def handle_health_check(self, request):
         """返回 WebUI 健康状态与自检信息。"""
+        health_payload = self._build_health_payload()
         return self._ok(
             {
-                "status": "ok",
+                "status": health_payload.get("status", "ok"),
                 "service": "screen-companion-webui",
-                "version": "2.8.1",
-                "plugin_version": "2.8.1",
+                "version": self.APP_VERSION,
+                "plugin_version": self.APP_VERSION,
                 "host": self.host,
                 "port": self.port,
                 "auth_enabled": bool(self._get_expected_secret()),
@@ -1339,6 +3166,10 @@ class WebServer:
                 "instance_match": getattr(self.plugin, "web_server", None) is self,
                 "pid": os.getpid(),
                 "checked_at": datetime.now().isoformat(),
+                "checks": health_payload.get("checks", []),
+                "recommendations": health_payload.get("recommendations", []),
+                "warning_count": int(health_payload.get("warning_count", 0) or 0),
+                "error_count": int(health_payload.get("error_count", 0) or 0),
             }
         )
 
@@ -1372,6 +3203,36 @@ class WebServer:
             [],
             limit=6,
         ) or []
+        activity_history = self._prepare_activity_history_for_display(
+            self._safe_plugin_call("_get_activity_history_for_stats", []) or []
+        )
+        input_stats = self._safe_plugin_call(
+            "_get_input_stats_runtime_status",
+            {},
+        ) or {}
+        away_pause = self._safe_plugin_call(
+            "_get_away_pause_runtime_status",
+            {},
+        ) or {}
+        background_activity_tracking = self._safe_plugin_call(
+            "_get_background_activity_tracking_runtime_status",
+            {},
+        ) or {}
+        today_key = datetime.now().date().isoformat()
+        today_history = [
+            item
+            for item in activity_history
+            if self._get_activity_day_key(item.get("start_time", 0)) == today_key
+        ]
+        activity_pulse = self._build_activity_workspace_story(
+            activity_history,
+            today_summary=self._summarize_activity_period(today_history),
+            input_stats=input_stats,
+        ).get("pulse", {})
+        activity_recognition_rules = self._safe_plugin_call(
+            "_get_activity_recognition_rule_summary",
+            {},
+        ) or {}
         screen_recognition_mode = bool(
             self._safe_plugin_call("_use_screen_recording_mode", False)
         )
@@ -1417,6 +3278,12 @@ class WebServer:
             "latest_screenshot": latest_screenshot,
             "latest_video": latest_video,
             "recent_screen_analyses": recent_screen_analyses,
+            "input_stats": input_stats,
+            "background_activity_tracking": background_activity_tracking,
+            "away_pause": away_pause,
+            "activity_pulse": activity_pulse,
+            "mask_activity_window_titles": self._plugin_bool("mask_activity_window_titles"),
+            "activity_recognition_rules": activity_recognition_rules,
             "presets": presets,
         }
 
@@ -1491,44 +3358,63 @@ class WebServer:
                 activity_history = self.plugin._get_activity_history_for_stats() or []
             else:
                 activity_history = getattr(self.plugin, "activity_history", []) or []
+        activity_history = self._prepare_activity_history_for_display(activity_history)
         today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+        yesterday_start = today_start - 24 * 60 * 60
 
-        today_work_time = 0
-        today_play_time = 0
-        today_other_time = 0
+        activity_history = [
+            item for item in (activity_history or []) if isinstance(item, dict)
+        ]
+        today_history = [
+            item
+            for item in activity_history
+            if float(item.get("start_time", 0) or 0) >= today_start
+        ]
+        yesterday_history = [
+            item
+            for item in activity_history
+            if (
+                yesterday_start
+                <= float(item.get("start_time", 0) or 0)
+                < today_start
+            )
+        ]
 
-        for activity in activity_history:
-            if activity.get("start_time", 0) >= today_start:
-                duration = activity.get("duration", 0)
-                activity_type = activity.get("type", "其他")
-                if activity_type == "工作":
-                    today_work_time += duration
-                elif activity_type == "摸鱼":
-                    today_play_time += duration
-                else:
-                    today_other_time += duration
-
-        total_work_time = sum(
-            activity.get("duration", 0)
-            for activity in activity_history
-            if activity.get("type") == "工作"
+        today_summary = self._summarize_activity_period(today_history)
+        total_summary = self._summarize_activity_period(activity_history)
+        yesterday_summary = self._summarize_activity_period(yesterday_history)
+        input_stats = self._safe_plugin_call(
+            "_build_input_stats_payload",
+            {
+                "enabled": False,
+                "available": False,
+                "status": "disabled",
+                "detail": "未启用本地输入统计",
+                "today": {},
+                "recent_days": [],
+                "window_total_inputs": 0,
+                "window_total_inputs_label": "0 次",
+                "window_active_minutes": 0,
+                "window_active_minutes_label": "0 分钟",
+            },
+            days=self.ACTIVITY_TREND_DAYS,
+        ) or {}
+        workspace_story = self._build_activity_workspace_story(
+            activity_history,
+            today_summary=today_summary,
+            input_stats=input_stats,
         )
-        total_play_time = sum(
-            activity.get("duration", 0)
-            for activity in activity_history
-            if activity.get("type") == "摸鱼"
+        surface_trail = self._build_activity_surface_trail(
+            today_history if today_history else activity_history,
+            limit=self.ACTIVITY_SURFACE_LIMIT,
         )
-        total_other_time = sum(
-            activity.get("duration", 0)
-            for activity in activity_history
-            if activity.get("type") not in {"工作", "摸鱼"}
-        )
+        capture_sources = self._summarize_activity_capture_sources(activity_history)
 
         recent_activities = sorted(
             activity_history,
-            key=lambda x: x.get("start_time", 0),
+            key=lambda x: float(x.get("start_time", 0) or 0),
             reverse=True,
-        )[:10]
+        )[:20]
 
         formatted_activities = []
         for activity in recent_activities:
@@ -1540,38 +3426,49 @@ class WebServer:
                     "type": activity.get("type", "其他"),
                     "scene": activity.get("scene", ""),
                     "window": activity.get("window", ""),
-                    "start_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_ts)),
-                    "end_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_ts)),
+                    "app_name": activity.get("app_name", ""),
+                    "site_label": activity.get("site_label", ""),
+                    "site_domain": activity.get("site_domain", ""),
+                    "page_title": activity.get("page_title", ""),
+                    "resource_label": activity.get("resource_label", ""),
+                    "resource_kind": activity.get("resource_kind", ""),
+                    "bucket_key": self._activity_bucket_key(activity.get("type", "")),
+                    "capture_source": str(activity.get("capture_source", "") or "screen_analysis"),
+                    "capture_source_label": self._capture_source_label(
+                        activity.get("capture_source", "") or "screen_analysis"
+                    ),
+                    "start_time": self._format_datetime(start_ts),
+                    "end_time": self._format_datetime(end_ts),
                     "duration": self._format_duration(duration),
                     "duration_seconds": int(duration or 0),
+                    "effective_duration": self._format_duration(
+                        activity.get("effective_duration", duration)
+                    ),
+                    "effective_duration_seconds": int(
+                        activity.get("effective_duration", duration) or 0
+                    ),
+                    "idle_trimmed_time": self._format_duration(
+                        activity.get("idle_trimmed_seconds", 0)
+                    ),
+                    "has_input_estimate": bool(activity.get("has_input_estimate", False)),
                 }
             )
 
         return {
-            "today": {
-                "work_time": self._format_duration(today_work_time),
-                "play_time": self._format_duration(today_play_time),
-                "other_time": self._format_duration(today_other_time),
-                "total_time": self._format_duration(
-                    today_work_time + today_play_time + today_other_time
-                ),
-                "work_seconds": int(today_work_time),
-                "play_seconds": int(today_play_time),
-                "other_seconds": int(today_other_time),
-                "total_seconds": int(today_work_time + today_play_time + today_other_time),
-            },
-            "total": {
-                "work_time": self._format_duration(total_work_time),
-                "play_time": self._format_duration(total_play_time),
-                "other_time": self._format_duration(total_other_time),
-                "total_time": self._format_duration(
-                    total_work_time + total_play_time + total_other_time
-                ),
-                "work_seconds": int(total_work_time),
-                "play_seconds": int(total_play_time),
-                "other_seconds": int(total_other_time),
-                "total_seconds": int(total_work_time + total_play_time + total_other_time),
-            },
+            "today": today_summary,
+            "total": total_summary,
+            "yesterday": yesterday_summary,
+            "review": self._build_activity_review(
+                today_summary=today_summary,
+                total_summary=total_summary,
+                yesterday_summary=yesterday_summary,
+                activity_history=activity_history,
+            ),
+            "pulse": workspace_story.get("pulse", {}),
+            "sessions": workspace_story.get("sessions", {}),
+            "input_stats": input_stats,
+            "surface_trail": surface_trail,
+            "capture_sources": capture_sources,
             "recent_activities": formatted_activities,
             "activity_count": len(activity_history),
         }
@@ -1860,8 +3757,20 @@ class WebServer:
                 return self._err("Preset index out of range", 400)
             updates["current_preset_index"] = preset_index
 
-        self.plugin._update_config_from_dict(updates)
-        return self._ok({"runtime": self._build_runtime_status()})
+        try:
+            self.plugin._update_config_from_dict(updates)
+            return self._ok(
+                {
+                    "runtime": self._build_runtime_status(),
+                    "meta": {
+                        "applied_keys": sorted(updates.keys()),
+                        "applied_count": len(updates),
+                    },
+                }
+            )
+        except Exception as e:
+            logger.error(f"更新运行时配置失败: {e}", exc_info=True)
+            return self._err(str(e))
 
     async def handle_stop_runtime_tasks(self, request):
         """停止当前自动观察任务。"""
@@ -1885,6 +3794,9 @@ class WebServer:
 
             if hasattr(self.plugin, "auto_tasks"):
                 self.plugin.auto_tasks.clear()
+            reset_away_pause = getattr(self.plugin, "_reset_away_pause_runtime_state", None)
+            if callable(reset_away_pause):
+                reset_away_pause()
 
             return self._ok({"runtime": self._build_runtime_status()})
         except Exception as e:
@@ -1964,6 +3876,8 @@ class WebServer:
             if hasattr(self.plugin, "diary_entries"):
                 diary_count = len(self.plugin.diary_entries or [])
                 self.plugin.diary_entries = []
+                if hasattr(self.plugin, "_save_pending_diary_entries"):
+                    self.plugin._save_pending_diary_entries()
                 if diary_count > 0:
                     cleared_items.append(f"日记({diary_count}条)")
             

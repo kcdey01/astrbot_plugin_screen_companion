@@ -5,7 +5,9 @@ import datetime
 import json
 import os
 import random
+import re
 import time
+import asyncio
 from typing import Any
 
 from astrbot.api import logger
@@ -13,6 +15,168 @@ from astrbot.api.event import AstrMessageEvent
 
 
 class ScreenCompanionMemoryMixin:
+    ACTIVITY_INPUT_GRACE_SECONDS = 5 * 60
+    ACTIVITY_BROWSER_APP_ALIASES = (
+        ("Chrome", ("google chrome", "chrome.exe", "chrome")),
+        ("Edge", ("microsoft edge", "msedge", "edge.exe", "edge")),
+        ("Firefox", ("firefox.exe", "firefox")),
+        ("Safari", ("safari",)),
+        ("Opera", ("opera gx", "opera.exe", "opera")),
+        ("Brave", ("brave.exe", "brave")),
+        ("Arc", ("arc.exe", " arc ")),
+        ("Vivaldi", ("vivaldi.exe", "vivaldi")),
+        ("QQ浏览器", ("qqbrowser", "qq browser", "qq浏览器")),
+        ("360浏览器", ("360chrome", "360se", "360浏览器")),
+    )
+    ACTIVITY_APP_ALIASES = ACTIVITY_BROWSER_APP_ALIASES + (
+        ("VS Code", ("visual studio code", "code.exe", "vscode", "code - insiders")),
+        ("Visual Studio", ("devenv.exe", "visual studio")),
+        ("PyCharm", ("pycharm",)),
+        ("IntelliJ IDEA", ("intellij", "idea64", "idea")),
+        ("WebStorm", ("webstorm",)),
+        ("GoLand", ("goland",)),
+        ("Rider", ("rider64", "jetbrains rider")),
+        ("Android Studio", ("android studio", "studio64.exe")),
+        ("Cursor", ("cursor.exe", "cursor")),
+        ("Windsurf", ("windsurf",)),
+        ("微信", ("wechat", "weixin", "微信")),
+        ("QQ", ("qq.exe", "tencent qq", "qq ")),
+        ("企业微信", ("wecom", "wxwork", "企业微信")),
+        ("飞书", ("feishu", "lark", "飞书")),
+        ("钉钉", ("dingtalk", "钉钉")),
+        ("Slack", ("slack",)),
+        ("Discord", ("discord",)),
+        ("Telegram", ("telegram",)),
+        ("Outlook", ("outlook",)),
+        ("Word", ("winword", "microsoft word", "word")),
+        ("Excel", ("excel.exe", "microsoft excel", "excel")),
+        ("PowerPoint", ("powerpnt", "powerpoint")),
+        ("WPS", ("wps", "wps office")),
+        ("Notion", ("notion",)),
+        ("Obsidian", ("obsidian",)),
+        ("Typora", ("typora",)),
+        ("Terminal", ("powershell", "cmd.exe", "terminal", "windows terminal", "bash", "zsh")),
+        ("Steam", ("steam",)),
+        ("PotPlayer", ("potplayer",)),
+        ("VLC", ("vlc",)),
+    )
+    ACTIVITY_GENERIC_BROWSER_SEGMENTS = frozenset(
+        {
+            "new tab",
+            "新标签页",
+            "about:blank",
+            "start page",
+            "主页",
+            "home",
+            "work",
+            "personal",
+            "guest",
+            "profile",
+            "people",
+            "browser",
+            "网页",
+            "网页浏览",
+            "标签页",
+            "标签",
+        }
+    )
+    ACTIVITY_KNOWN_SITES = (
+        ("github.com", "GitHub", ("github", "pull request", "commit", "issue · github")),
+        ("gitlab.com", "GitLab", ("gitlab",)),
+        ("gitee.com", "Gitee", ("gitee",)),
+        ("stackoverflow.com", "Stack Overflow", ("stackoverflow", "stack exchange")),
+        ("leetcode.com", "LeetCode", ("leetcode", "力扣")),
+        ("juejin.cn", "稀土掘金", ("juejin", "掘金")),
+        ("zhihu.com", "知乎", ("zhihu", "知乎")),
+        ("notion.so", "Notion", ("notion",)),
+        ("figma.com", "Figma", ("figma",)),
+        ("feishu.cn", "飞书", ("feishu", "lark", "飞书")),
+        ("docs.qq.com", "腾讯文档", ("腾讯文档", "docs.qq")),
+        ("doc.weixin.qq.com", "微信文档", ("微信文档", "doc.weixin")),
+        ("yuque.com", "语雀", ("yuque", "语雀")),
+        ("confluence.com", "Confluence", ("confluence",)),
+        ("atlassian.net", "Jira", ("jira", "atlassian")),
+        ("linear.app", "Linear", ("linear",)),
+        ("trello.com", "Trello", ("trello",)),
+        ("asana.com", "Asana", ("asana",)),
+        ("docs.google.com", "Google Docs", ("docs.google", "google docs")),
+        ("drive.google.com", "Google Drive", ("drive.google", "google drive")),
+        ("mail.google.com", "Gmail", ("gmail",)),
+        ("outlook.com", "Outlook", ("outlook", "office outlook")),
+        ("slack.com", "Slack", ("slack",)),
+        ("discord.com", "Discord", ("discord",)),
+        ("teams.microsoft.com", "Teams", ("microsoft teams", "teams")),
+        ("bilibili.com", "Bilibili", ("bilibili", "哔哩哔哩", "b站")),
+        ("youtube.com", "YouTube", ("youtube",)),
+        ("netflix.com", "Netflix", ("netflix",)),
+        ("x.com", "X", (" twitter ", "x.com", "tweet")),
+        ("weibo.com", "微博", ("weibo", "微博")),
+        ("xiaohongshu.com", "小红书", ("xiaohongshu", "小红书")),
+        ("taobao.com", "淘宝", ("taobao", "淘宝")),
+        ("jd.com", "京东", ("jd.com", "京东")),
+        ("douban.com", "豆瓣", ("douban", "豆瓣")),
+    )
+    BACKGROUND_ACTIVITY_APP_SCENES = {
+        "VS Code": "编程",
+        "Visual Studio": "编程",
+        "PyCharm": "编程",
+        "IntelliJ IDEA": "编程",
+        "WebStorm": "编程",
+        "GoLand": "编程",
+        "Rider": "编程",
+        "Android Studio": "编程",
+        "Cursor": "编程",
+        "Windsurf": "编程",
+        "Terminal": "编程",
+        "Word": "办公",
+        "Excel": "办公",
+        "PowerPoint": "办公",
+        "WPS": "办公",
+        "Outlook": "邮件",
+        "Notion": "办公",
+        "Obsidian": "阅读",
+        "Typora": "阅读",
+        "微信": "社交",
+        "QQ": "社交",
+        "企业微信": "社交",
+        "飞书": "社交",
+        "钉钉": "社交",
+        "Slack": "社交",
+        "Discord": "社交",
+        "Telegram": "社交",
+        "Steam": "游戏",
+        "PotPlayer": "视频",
+        "VLC": "视频",
+    }
+    BACKGROUND_ACTIVITY_WORK_SITES = frozenset(
+        {
+            "GitHub",
+            "GitLab",
+            "Gitee",
+            "Stack Overflow",
+            "LeetCode",
+            "稀土掘金",
+            "Notion",
+            "Figma",
+            "飞书",
+            "腾讯文档",
+            "微信文档",
+            "语雀",
+            "Confluence",
+            "Jira",
+            "Linear",
+            "Trello",
+            "Asana",
+            "Google Docs",
+            "Google Drive",
+        }
+    )
+    BACKGROUND_ACTIVITY_MAIL_SITES = frozenset({"Gmail", "Outlook"})
+    BACKGROUND_ACTIVITY_SOCIAL_SITES = frozenset({"Slack", "Discord", "Teams", "X", "微博", "小红书"})
+    BACKGROUND_ACTIVITY_ENTERTAINMENT_SITES = frozenset(
+        {"Bilibili", "YouTube", "Netflix", "淘宝", "京东", "豆瓣"}
+    )
+
     def _load_observations(self):
         """加载观察记录。"""
         try:
@@ -135,6 +299,7 @@ class ScreenCompanionMemoryMixin:
 
     def _load_diary_metadata(self):
         """加载日记元数据。"""
+        self.diary_metadata = {}
         try:
             import json
             import os
@@ -742,7 +907,12 @@ class ScreenCompanionMemoryMixin:
         if self._is_low_value_record_text(content):
             return False, "low_value"
 
-        recent_entries = list(getattr(self, "diary_entries", []) or [])[-3:]
+        target_date = self._resolve_diary_target_date().isoformat()
+        recent_entries = [
+            entry
+            for entry in list(getattr(self, "diary_entries", []) or [])
+            if str(entry.get("date", target_date) or target_date).strip() == target_date
+        ][-3:]
         for entry in reversed(recent_entries):
             previous_window = self._normalize_window_title(entry.get("active_window", ""))
             if normalized_window and previous_window and normalized_window != previous_window:
@@ -806,6 +976,249 @@ class ScreenCompanionMemoryMixin:
             return hour * 60 + minute
         except Exception:
             return None
+
+    @staticmethod
+    def _format_diary_duration_label(seconds: float | int) -> str:
+        total_seconds = max(0, int(float(seconds or 0)))
+        return f"{int(total_seconds // 60)}分{int(total_seconds % 60)}秒"
+
+    @staticmethod
+    def _format_diary_clock_label(timestamp_value: float | int | None) -> str:
+        try:
+            timestamp = float(timestamp_value or 0)
+        except Exception:
+            timestamp = 0.0
+        if timestamp <= 0:
+            return ""
+        return datetime.datetime.fromtimestamp(timestamp).strftime("%H:%M")
+
+    def _get_diary_activity_history_for_date(
+        self,
+        target_date: datetime.date,
+    ) -> list[dict[str, Any]]:
+        if hasattr(self, "_get_activity_history_for_stats"):
+            activity_history = self._get_activity_history_for_stats() or []
+        else:
+            activity_history = list(getattr(self, "activity_history", []) or [])
+
+        prepared_history = list(activity_history)
+        web_server = getattr(self, "web_server", None)
+        if web_server and hasattr(web_server, "_prepare_activity_history_for_display"):
+            try:
+                prepared_history = web_server._prepare_activity_history_for_display(
+                    activity_history
+                )
+            except Exception as e:
+                logger.debug(f"为日记准备活动历史失败: {e}")
+                prepared_history = list(activity_history)
+
+        filtered_history: list[dict[str, Any]] = []
+        for item in prepared_history or []:
+            if not isinstance(item, dict):
+                continue
+            start_ts = float(item.get("start_time", 0) or 0)
+            if start_ts <= 0:
+                continue
+            try:
+                bucket_date = self._resolve_diary_target_date(
+                    datetime.datetime.fromtimestamp(start_ts)
+                )
+            except Exception:
+                continue
+            if bucket_date != target_date:
+                continue
+
+            raw_duration = max(
+                0.0,
+                float(item.get("raw_duration", item.get("duration", 0)) or 0),
+            )
+            effective_duration = max(
+                0.0,
+                float(item.get("effective_duration", raw_duration) or raw_duration),
+            )
+            if raw_duration <= 0 and effective_duration <= 0:
+                continue
+            filtered_history.append(dict(item))
+
+        return sorted(
+            filtered_history,
+            key=lambda item: float(item.get("start_time", 0) or 0),
+        )
+
+    def _build_diary_activity_fallback_entries(
+        self,
+        target_date: datetime.date,
+        *,
+        max_items: int = 3,
+        min_duration_seconds: int = 3 * 60,
+        merge_gap_seconds: int = 15 * 60,
+    ) -> list[dict[str, str]]:
+        day_history = self._get_diary_activity_history_for_date(target_date)
+        if not day_history:
+            return []
+
+        merged_groups: list[dict[str, Any]] = []
+        for item in day_history:
+            start_ts = float(item.get("start_time", 0) or 0)
+            end_ts = float(item.get("end_time", 0) or 0)
+            raw_duration = max(
+                0.0,
+                float(item.get("raw_duration", item.get("duration", 0)) or 0),
+            )
+            effective_duration = max(
+                0.0,
+                float(item.get("effective_duration", raw_duration) or raw_duration),
+            )
+            display_duration = effective_duration if effective_duration > 0 else raw_duration
+            if display_duration < max(0, int(min_duration_seconds or 0)):
+                continue
+            if end_ts <= start_ts:
+                end_ts = start_ts + max(raw_duration, display_duration)
+
+            window = self._normalize_window_title(item.get("window") or "")
+            app_name = str(item.get("app_name", "") or "").strip()
+            site_label = str(item.get("site_label", "") or "").strip()
+            page_title = str(item.get("page_title", "") or "").strip()
+            scene = self._normalize_scene_label(item.get("scene") or "")
+            idle_trimmed_seconds = max(
+                0.0,
+                float(item.get("idle_trimmed_seconds", 0) or 0),
+            )
+            has_input_estimate = bool(item.get("has_input_estimate", False))
+
+            if page_title and site_label:
+                focus_label = f"{site_label} 的《{page_title}》"
+            elif page_title and app_name:
+                focus_label = f"{app_name} 里的《{page_title}》"
+            elif page_title:
+                focus_label = f"《{page_title}》"
+            elif site_label:
+                focus_label = site_label
+            elif app_name:
+                focus_label = app_name
+            else:
+                focus_label = window or "当前窗口"
+
+            normalized_window = window or focus_label
+            group_key = (normalized_window, focus_label, scene)
+
+            if merged_groups:
+                previous = merged_groups[-1]
+                gap_seconds = start_ts - float(previous.get("end_ts", 0) or 0)
+                if (
+                    previous.get("group_key") == group_key
+                    and 0 <= gap_seconds <= max(0, int(merge_gap_seconds or 0))
+                ):
+                    previous["end_ts"] = max(
+                        float(previous.get("end_ts", 0) or 0),
+                        end_ts,
+                    )
+                    previous["raw_duration"] = float(
+                        previous.get("raw_duration", 0) or 0
+                    ) + raw_duration
+                    previous["effective_duration"] = float(
+                        previous.get("effective_duration", 0) or 0
+                    ) + display_duration
+                    previous["idle_trimmed_seconds"] = float(
+                        previous.get("idle_trimmed_seconds", 0) or 0
+                    ) + idle_trimmed_seconds
+                    previous["has_input_estimate"] = bool(
+                        previous.get("has_input_estimate", False)
+                        or has_input_estimate
+                    )
+                    continue
+
+            merged_groups.append(
+                {
+                    "group_key": group_key,
+                    "start_ts": start_ts,
+                    "end_ts": end_ts,
+                    "raw_duration": raw_duration,
+                    "effective_duration": display_duration,
+                    "idle_trimmed_seconds": idle_trimmed_seconds,
+                    "has_input_estimate": has_input_estimate,
+                    "window": normalized_window,
+                    "focus_label": focus_label,
+                    "scene": scene,
+                }
+            )
+
+        if not merged_groups:
+            return []
+
+        max_items = max(1, int(max_items or 1))
+        selected_indexes = sorted(
+            sorted(
+                range(len(merged_groups)),
+                key=lambda idx: (
+                    float(merged_groups[idx].get("effective_duration", 0) or 0),
+                    float(merged_groups[idx].get("raw_duration", 0) or 0),
+                ),
+                reverse=True,
+            )[:max_items],
+            key=lambda idx: float(merged_groups[idx].get("start_ts", 0) or 0),
+        )
+
+        fallback_entries: list[dict[str, str]] = []
+        for idx in selected_indexes:
+            group = merged_groups[idx]
+            window = str(group.get("window", "") or "").strip() or "当前窗口"
+            focus_label = str(group.get("focus_label", "") or "").strip() or window
+            scene = str(group.get("scene", "") or "").strip()
+            display_duration = float(group.get("effective_duration", 0) or 0)
+            raw_duration = float(group.get("raw_duration", 0) or 0)
+            idle_trimmed_seconds = float(group.get("idle_trimmed_seconds", 0) or 0)
+            has_input_estimate = bool(group.get("has_input_estimate", False))
+
+            content = (
+                f"从窗口轨迹看，你在 {focus_label} 停留了约 "
+                f"{self._format_diary_duration_label(display_duration)}"
+            )
+            if window and focus_label != window:
+                content += f"，窗口是《{window}》"
+            if scene:
+                content += f"，当时更像在{scene}"
+            if has_input_estimate and idle_trimmed_seconds >= 3 * 60:
+                content += (
+                    f"，按本地输入估算，真正有操作的大约是 "
+                    f"{self._format_diary_duration_label(max(0.0, raw_duration - idle_trimmed_seconds))}"
+                )
+            content += "。"
+
+            start_ts = float(group.get("start_ts", 0) or 0)
+            clock_label = self._format_diary_clock_label(start_ts) or "00:00"
+            fallback_entries.append(
+                {
+                    "date": target_date.isoformat(),
+                    "time": f"{clock_label}:00" if len(clock_label) == 5 else clock_label,
+                    "timestamp": datetime.datetime.fromtimestamp(start_ts).isoformat(
+                        timespec="seconds"
+                    )
+                    if start_ts > 0
+                    else f"{target_date.isoformat()}T{clock_label[:5]}:00",
+                    "content": content,
+                    "active_window": window,
+                }
+            )
+
+        return fallback_entries
+
+    def _build_diary_activity_fallback_context(
+        self,
+        entries: list[dict[str, Any]] | None,
+    ) -> str:
+        valid_entries = [
+            entry for entry in (entries or []) if isinstance(entry, dict)
+        ]
+        if not valid_entries:
+            return ""
+
+        lines = ["当天窗口轨迹补充："]
+        for index, entry in enumerate(valid_entries, 1):
+            time_label = str(entry.get("time", "") or "").strip()[:5]
+            prefix = f"{index}. [{time_label}] " if time_label else f"{index}. "
+            lines.append(prefix + str(entry.get("content", "") or "").strip())
+        return "\n".join(lines).strip()
 
     def _compact_diary_entries(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         compacted: list[dict[str, Any]] = []
@@ -3073,7 +3486,7 @@ class ScreenCompanionMemoryMixin:
             )
         return sent
 
-    def _update_activity(self, scene, active_window):
+    def _update_activity(self, scene, active_window, *, source: str = "screen_analysis"):
         """更新活动状态，记录工作/摸鱼时间。"""
         import time
         current_time = time.time()
@@ -3089,8 +3502,18 @@ class ScreenCompanionMemoryMixin:
         elif scene in play_scenes:
             activity_type = "摸鱼"
 
+        normalized_scene = self._normalize_scene_label(scene or "")
+        normalized_window = self._normalize_window_title(active_window or "")
+        activity_source = str(source or "screen_analysis").strip() or "screen_analysis"
+        activity_meta = self._build_activity_record_meta(
+            activity_type=activity_type,
+            scene=normalized_scene,
+            window=normalized_window,
+        )
+        activity_meta["capture_source"] = activity_source
+
         # 创建活动标识
-        activity = f"{activity_type}:{scene}:{active_window[:50]}"
+        activity = f"{activity_type}:{normalized_scene}:{normalized_window}"
 
         # 如果活动发生变化，记录上一个活动的时间
         if self.current_activity != activity:
@@ -3099,11 +3522,21 @@ class ScreenCompanionMemoryMixin:
                     activity=self.current_activity,
                     start_time=self.activity_start_time,
                     end_time=current_time,
+                    activity_meta=getattr(self, "current_activity_meta", None),
                 )
 
             # 更新当前活动
             self.current_activity = activity
+            self.current_activity_meta = activity_meta
+            self.current_activity_source = activity_source
             self.activity_start_time = current_time
+        elif (
+            isinstance(getattr(self, "current_activity_meta", None), dict)
+            and str(getattr(self, "current_activity_source", "") or "").strip()
+            != activity_source
+        ):
+            self.current_activity_meta = activity_meta
+            self.current_activity_source = activity_source
 
         return activity_type
 
@@ -3118,7 +3551,12 @@ class ScreenCompanionMemoryMixin:
                 return
             with open(activity_history_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self.activity_history = data if isinstance(data, list) else []
+            normalized_history: list[dict[str, Any]] = []
+            for item in data if isinstance(data, list) else []:
+                normalized = self._normalize_activity_record(item)
+                if normalized is not None:
+                    normalized_history.append(normalized)
+            self.activity_history = normalized_history
         except Exception as e:
             logger.error(f"加载活动历史失败: {e}")
             self.activity_history = []
@@ -3423,12 +3861,503 @@ class ScreenCompanionMemoryMixin:
         if isinstance(info, dict):
             self._remember_inferred_rest_memory(info)
 
+    def _close_current_activity(
+        self,
+        *,
+        end_time: float | None = None,
+        min_duration_seconds: int | None = None,
+        only_source: str = "",
+    ) -> bool:
+        current_activity = str(getattr(self, "current_activity", "") or "").strip()
+        activity_start_time = float(getattr(self, "activity_start_time", 0) or 0)
+        current_source = str(getattr(self, "current_activity_source", "") or "").strip()
+        required_source = str(only_source or "").strip()
+        if required_source and current_source != required_source:
+            return False
+        if not current_activity or activity_start_time <= 0:
+            return False
+
+        closed = self._append_activity_record(
+            activity=current_activity,
+            start_time=activity_start_time,
+            end_time=float(end_time or time.time()),
+            min_duration_seconds=min_duration_seconds,
+            activity_meta=getattr(self, "current_activity_meta", None),
+        )
+        self.current_activity = None
+        self.current_activity_meta = None
+        self.current_activity_source = ""
+        self.activity_start_time = None
+        return closed
+
+    def _is_background_activity_tracking_effective(self) -> bool:
+        if not bool(getattr(self, "running", False)):
+            return False
+        if not bool(getattr(self, "enabled", False)):
+            return False
+        if not bool(getattr(self, "enable_background_activity_tracking", False)):
+            return False
+        if bool(getattr(self, "is_running", False)):
+            return False
+        is_window_companion_active = getattr(
+            self,
+            "_is_window_companion_session_active",
+            None,
+        )
+        if callable(is_window_companion_active) and is_window_companion_active():
+            return False
+        return True
+
+    def _get_background_activity_tracking_runtime_status(self) -> dict[str, Any]:
+        interval = max(
+            5,
+            int(getattr(self, "background_activity_tracking_interval", 15) or 15),
+        )
+        return {
+            "enabled": bool(getattr(self, "enable_background_activity_tracking", False)),
+            "active": self._is_background_activity_tracking_effective(),
+            "interval": interval,
+        }
+
+    def _infer_background_activity_scene(self, window_title: str) -> str:
+        normalized_window = self._normalize_window_title(window_title or "")
+        if not normalized_window:
+            return ""
+
+        app_name = self._detect_activity_app_name(normalized_window)
+        site_info = self._extract_activity_site_info(
+            scene="浏览",
+            window=normalized_window,
+            app_name=app_name,
+        )
+        site_label = str(site_info.get("site_label", "") or "").strip()
+        inferred_scene = self._normalize_scene_label(self._identify_scene(normalized_window))
+
+        if site_label in self.BACKGROUND_ACTIVITY_MAIL_SITES:
+            return "邮件"
+        if site_label in self.BACKGROUND_ACTIVITY_SOCIAL_SITES:
+            return "社交"
+        if site_label in self.BACKGROUND_ACTIVITY_WORK_SITES:
+            return "浏览-工作"
+        if site_label in self.BACKGROUND_ACTIVITY_ENTERTAINMENT_SITES:
+            return "浏览-娱乐"
+
+        app_scene = self.BACKGROUND_ACTIVITY_APP_SCENES.get(app_name, "")
+        if app_scene:
+            return app_scene
+
+        if inferred_scene and inferred_scene != "未知":
+            if inferred_scene == "浏览" and site_label:
+                return "浏览"
+            return inferred_scene
+
+        if site_label or self._is_activity_browser_app(app_name):
+            return "浏览"
+
+        return "其他"
+
+    async def _background_activity_tracking_task(self) -> None:
+        empty_title_streak = 0
+        while self.running and self._is_current_process_instance():
+            interval = max(
+                5,
+                int(getattr(self, "background_activity_tracking_interval", 15) or 15),
+            )
+            if not self._is_background_activity_tracking_effective():
+                empty_title_streak = 0
+                self._close_current_activity(
+                    min_duration_seconds=self.LIVE_ACTIVITY_MIN_DURATION_SECONDS,
+                    only_source="background_tracker",
+                )
+                await asyncio.sleep(min(interval, 5))
+                continue
+
+            try:
+                active_window_title, _ = await asyncio.to_thread(
+                    self._get_active_window_info
+                )
+            except Exception as e:
+                logger.debug(f"独立活动轨迹采样失败: {e}")
+                await asyncio.sleep(interval)
+                continue
+
+            normalized_window = self._normalize_window_title(active_window_title or "")
+            if not normalized_window:
+                empty_title_streak += 1
+                if empty_title_streak >= 2:
+                    self._close_current_activity(
+                        min_duration_seconds=self.LIVE_ACTIVITY_MIN_DURATION_SECONDS,
+                        only_source="background_tracker",
+                    )
+                await asyncio.sleep(interval)
+                continue
+
+            empty_title_streak = 0
+            scene = self._infer_background_activity_scene(normalized_window) or "其他"
+            self._update_activity(
+                scene,
+                normalized_window,
+                source="background_tracker",
+            )
+            await asyncio.sleep(interval)
+
     def _parse_activity_marker(self, activity: str) -> tuple[str, str, str]:
         parts = str(activity or "").split(":", 2)
         activity_type = parts[0] if len(parts) > 0 else "其他"
         scene = parts[1] if len(parts) > 1 else ""
         window = parts[2] if len(parts) > 2 else ""
         return activity_type, scene, window
+
+    @staticmethod
+    def _split_activity_window_parts(window_title: str) -> list[str]:
+        parts = [str(window_title or "").strip()]
+        separators = (" - ", " | ", " — ", " – ", " · ", " • ", " :: ")
+        for separator in separators:
+            next_parts: list[str] = []
+            for part in parts:
+                next_parts.extend(str(part).split(separator))
+            parts = next_parts
+        return [str(part).strip() for part in parts if str(part).strip()]
+
+    def _detect_activity_app_name(self, window_title: str) -> str:
+        normalized_window = self._normalize_window_title(window_title or "")
+        if not normalized_window:
+            return ""
+        custom_app_name = self._match_custom_activity_app_name(normalized_window)
+        if custom_app_name:
+            return custom_app_name
+        lowered = f" {normalized_window.casefold()} "
+        for label, aliases in self.ACTIVITY_APP_ALIASES:
+            if any(alias.casefold() in lowered for alias in aliases):
+                return label
+        parts = self._split_activity_window_parts(normalized_window)
+        if len(parts) >= 2:
+            return self._normalize_window_title(parts[-1])[:48]
+        return normalized_window[:48]
+
+    def _is_activity_browser_app(self, app_name: str) -> bool:
+        normalized_app = str(app_name or "").strip()
+        if not normalized_app:
+            return False
+        return any(label == normalized_app for label, _ in self.ACTIVITY_BROWSER_APP_ALIASES)
+
+    @staticmethod
+    def _extract_activity_domain(text: str) -> str:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return ""
+        match = re.search(
+            r"(?i)\b((?:[a-z0-9-]+\.)+(?:com|cn|org|net|io|ai|dev|app|gg|tv|me|so|co|edu|gov|top|info|fm|cc|xyz|com\.cn|net\.cn))\b",
+            normalized,
+        )
+        if not match:
+            return ""
+        domain = match.group(1).lower().strip(".")
+        return domain[4:] if domain.startswith("www.") else domain
+
+    @staticmethod
+    def _clean_activity_site_label(text: str) -> str:
+        label = str(text or "").strip()
+        if not label:
+            return ""
+        label = re.sub(r"^\(\d+\)\s*", "", label).strip()
+        label = re.sub(r"\s+", " ", label).strip("-|· ")
+        return label[:60].strip()
+
+    def _match_known_activity_site(self, text: str) -> dict[str, str]:
+        lowered = f" {str(text or '').casefold()} "
+        if not lowered.strip():
+            return {}
+        custom_match = self._match_custom_activity_site(text)
+        if custom_match:
+            return custom_match
+        for domain, label, aliases in self.ACTIVITY_KNOWN_SITES:
+            if domain.casefold() in lowered or any(alias.casefold() in lowered for alias in aliases):
+                return {
+                    "site_label": label,
+                    "site_domain": domain,
+                }
+        return {}
+
+    def _get_activity_recognition_rules(self) -> dict[str, list[dict[str, str]]]:
+        raw_rules = str(getattr(self, "activity_recognition_rules", "") or "")
+        cached_raw = getattr(self, "_activity_recognition_rules_cache_key", None)
+        cached_rules = getattr(self, "_activity_recognition_rules_cache", None)
+        if cached_raw == raw_rules and isinstance(cached_rules, dict):
+            return cached_rules
+
+        parsed_rules: dict[str, list[dict[str, str]]] = {
+            "app": [],
+            "site": [],
+        }
+        invalid_lines: list[int] = []
+
+        for line_number, raw_line in enumerate(raw_rules.splitlines(), start=1):
+            line = str(raw_line or "").strip()
+            if not line or line.startswith("#"):
+                continue
+
+            parts = [str(part or "").strip() for part in raw_line.split("|")]
+            if len(parts) < 3:
+                invalid_lines.append(line_number)
+                continue
+
+            rule_kind = parts[0].casefold()
+            pattern = str(parts[1] or "").strip()
+            label = str(parts[2] or "").strip()
+            if rule_kind not in {"app", "site"} or not pattern or not label:
+                invalid_lines.append(line_number)
+                continue
+
+            if rule_kind == "app":
+                cleaned_label = self._normalize_window_title(label)[:48]
+                if not cleaned_label:
+                    invalid_lines.append(line_number)
+                    continue
+                parsed_rules["app"].append(
+                    {
+                        "pattern": pattern.casefold(),
+                        "label": cleaned_label,
+                    }
+                )
+                continue
+
+            cleaned_label = self._clean_activity_site_label(label)
+            if not cleaned_label:
+                invalid_lines.append(line_number)
+                continue
+            explicit_domain = self._extract_activity_domain(parts[3]) if len(parts) >= 4 else ""
+            parsed_rules["site"].append(
+                {
+                    "pattern": pattern.casefold(),
+                    "label": cleaned_label,
+                    "site_domain": explicit_domain or self._extract_activity_domain(pattern),
+                }
+            )
+
+        if invalid_lines:
+            logger.debug(
+                f"跳过无效的活动识别规则行: {', '.join(str(number) for number in invalid_lines[:12])}"
+            )
+
+        setattr(self, "_activity_recognition_rules_cache_key", raw_rules)
+        setattr(self, "_activity_recognition_rules_cache", parsed_rules)
+        setattr(self, "_activity_recognition_rules_invalid_lines", invalid_lines)
+        return parsed_rules
+
+    def _match_custom_activity_app_name(self, window_title: str) -> str:
+        normalized_window = self._normalize_window_title(window_title or "")
+        if not normalized_window:
+            return ""
+        lowered = f" {normalized_window.casefold()} "
+        for rule in self._get_activity_recognition_rules().get("app", []):
+            pattern = str(rule.get("pattern", "") or "").strip()
+            label = str(rule.get("label", "") or "").strip()
+            if pattern and label and pattern in lowered:
+                return label
+        return ""
+
+    def _match_custom_activity_site(self, text: str) -> dict[str, str]:
+        lowered = f" {str(text or '').casefold()} "
+        if not lowered.strip():
+            return {}
+        for rule in self._get_activity_recognition_rules().get("site", []):
+            pattern = str(rule.get("pattern", "") or "").strip()
+            label = str(rule.get("label", "") or "").strip()
+            if pattern and label and pattern in lowered:
+                return {
+                    "site_label": label,
+                    "site_domain": str(
+                        rule.get("site_domain", "") or self._extract_activity_domain(text)
+                    ).strip(),
+                }
+        return {}
+
+    def _get_activity_recognition_rule_summary(self) -> dict[str, int]:
+        parsed_rules = self._get_activity_recognition_rules()
+        app_rules = len(parsed_rules.get("app", []))
+        site_rules = len(parsed_rules.get("site", []))
+        invalid_lines = len(
+            getattr(self, "_activity_recognition_rules_invalid_lines", []) or []
+        )
+        return {
+            "app_rules": int(app_rules),
+            "site_rules": int(site_rules),
+            "total_rules": int(app_rules + site_rules),
+            "invalid_lines": int(invalid_lines),
+        }
+
+    def _is_generic_browser_segment(self, text: str, *, app_name: str = "") -> bool:
+        cleaned = self._clean_activity_site_label(text)
+        lowered = cleaned.casefold()
+        if not lowered:
+            return True
+        if lowered in self.ACTIVITY_GENERIC_BROWSER_SEGMENTS:
+            return True
+        if app_name and lowered == str(app_name).casefold():
+            return True
+        if re.fullmatch(r"\(\d+\)", lowered):
+            return True
+        for label, aliases in self.ACTIVITY_BROWSER_APP_ALIASES:
+            if lowered == label.casefold():
+                return True
+            if any(lowered == alias.casefold().strip() for alias in aliases):
+                return True
+        return False
+
+    def _derive_browser_title_context(
+        self,
+        *,
+        normalized_window: str,
+        app_name: str,
+    ) -> dict[str, str]:
+        raw_parts = self._split_activity_window_parts(normalized_window)
+        meaningful_parts = [
+            self._clean_activity_site_label(part)
+            for part in raw_parts
+            if not self._is_generic_browser_segment(part, app_name=app_name)
+        ]
+        meaningful_parts = [part for part in meaningful_parts if part]
+        if not meaningful_parts:
+            return {"site_label": "", "site_domain": "", "page_title": ""}
+
+        site_label = ""
+        site_domain = ""
+        site_index = -1
+
+        for idx in range(len(meaningful_parts) - 1, -1, -1):
+            matched = self._match_known_activity_site(meaningful_parts[idx])
+            if matched:
+                site_label = str(matched.get("site_label", "") or "").strip()
+                site_domain = str(matched.get("site_domain", "") or "").strip()
+                site_index = idx
+                break
+
+        if not site_label:
+            for idx in range(len(meaningful_parts) - 1, -1, -1):
+                domain = self._extract_activity_domain(meaningful_parts[idx])
+                if domain:
+                    site_label = domain
+                    site_domain = domain
+                    site_index = idx
+                    break
+
+        if not site_label and len(meaningful_parts) >= 2:
+            trailing = self._clean_activity_site_label(meaningful_parts[-1])
+            if trailing and trailing.casefold() != str(app_name or "").casefold():
+                site_label = trailing
+                site_domain = self._extract_activity_domain(trailing)
+                site_index = len(meaningful_parts) - 1
+
+        page_parts = list(meaningful_parts)
+        if site_index >= 0:
+            page_parts = meaningful_parts[:site_index]
+        elif len(meaningful_parts) > 1:
+            page_parts = meaningful_parts[:-1]
+
+        page_title = " · ".join(page_parts).strip(" ·")
+        if page_title and site_label and page_title.casefold() == site_label.casefold():
+            page_title = ""
+        if page_title and app_name and page_title.casefold() == str(app_name).casefold():
+            page_title = ""
+        page_title = page_title[:96].strip()
+
+        return {
+            "site_label": site_label,
+            "site_domain": site_domain,
+            "page_title": page_title,
+        }
+
+    def _extract_activity_site_info(
+        self,
+        *,
+        scene: str,
+        window: str,
+        app_name: str,
+    ) -> dict[str, str]:
+        normalized_scene = self._normalize_scene_label(scene or "")
+        normalized_window = self._normalize_window_title(window or "")
+        if not normalized_window:
+            return {"site_label": "", "site_domain": "", "page_title": ""}
+
+        if not self._is_activity_browser_app(app_name) and not normalized_scene.startswith("浏览"):
+            return {"site_label": "", "site_domain": "", "page_title": ""}
+
+        context = self._derive_browser_title_context(
+            normalized_window=normalized_window,
+            app_name=app_name,
+        )
+        if any(context.values()):
+            return context
+        return {"site_label": "", "site_domain": "", "page_title": ""}
+
+    def _build_activity_record_meta(
+        self,
+        *,
+        activity_type: str,
+        scene: str,
+        window: str,
+    ) -> dict[str, Any]:
+        normalized_type = str(activity_type or "其他").strip() or "其他"
+        normalized_scene = self._normalize_scene_label(scene or "")
+        normalized_window = self._normalize_window_title(window or "")
+        app_name = self._detect_activity_app_name(normalized_window)
+        site_info = self._extract_activity_site_info(
+            scene=normalized_scene,
+            window=normalized_window,
+            app_name=app_name,
+        )
+        site_label = str(site_info.get("site_label", "") or "").strip()
+        site_domain = str(site_info.get("site_domain", "") or "").strip()
+        page_title = str(site_info.get("page_title", "") or "").strip()
+        return {
+            "type": normalized_type,
+            "scene": normalized_scene,
+            "window": normalized_window,
+            "app_name": app_name,
+            "site_label": site_label,
+            "site_domain": site_domain,
+            "page_title": page_title,
+            "resource_kind": "page" if page_title else ("site" if site_label else "app"),
+            "resource_label": page_title or site_label or app_name or normalized_window or "未命名活动",
+        }
+
+    def _normalize_activity_record(self, item: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+
+        raw_duration = max(0.0, float(item.get("raw_duration", item.get("duration", 0)) or 0))
+        start_time = float(item.get("start_time", 0) or 0)
+        end_time = float(item.get("end_time", 0) or 0)
+        if raw_duration <= 0 and start_time > 0 and end_time > start_time:
+            raw_duration = end_time - start_time
+
+        meta = self._build_activity_record_meta(
+            activity_type=str(item.get("type", "其他") or "其他"),
+            scene=str(item.get("scene", "") or ""),
+            window=str(item.get("window", "") or ""),
+        )
+        effective_duration = max(
+            0.0,
+            float(item.get("effective_duration", raw_duration) or raw_duration),
+        )
+        effective_duration = min(raw_duration, effective_duration) if raw_duration > 0 else 0.0
+        idle_trimmed_seconds = max(
+            0.0,
+            float(item.get("idle_trimmed_seconds", raw_duration - effective_duration) or 0),
+        )
+
+        return {
+            **meta,
+            "start_time": start_time,
+            "end_time": end_time,
+            "duration": raw_duration,
+            "raw_duration": raw_duration,
+            "effective_duration": effective_duration if effective_duration > 0 else raw_duration,
+            "idle_trimmed_seconds": idle_trimmed_seconds,
+            "has_input_estimate": bool(item.get("has_input_estimate", False)),
+            "capture_source": str(item.get("capture_source", meta.get("capture_source", "")) or "").strip(),
+        }
 
     def _append_activity_record(
         self,
@@ -3437,6 +4366,7 @@ class ScreenCompanionMemoryMixin:
         start_time: float,
         end_time: float,
         min_duration_seconds: int | None = None,
+        activity_meta: dict[str, Any] | None = None,
     ) -> bool:
         min_duration = (
             self.ACTIVITY_MIN_DURATION_SECONDS
@@ -3448,16 +4378,34 @@ class ScreenCompanionMemoryMixin:
             return False
 
         activity_type, scene, window = self._parse_activity_marker(activity)
-        self.activity_history.append(
+        meta = (
+            dict(activity_meta)
+            if isinstance(activity_meta, dict)
+            else self._build_activity_record_meta(
+                activity_type=activity_type,
+                scene=scene,
+                window=window,
+            )
+        )
+        record = self._normalize_activity_record(
             {
-                "type": activity_type,
-                "scene": scene,
-                "window": window,
+                **meta,
+                "type": meta.get("type", activity_type),
+                "scene": meta.get("scene", scene),
+                "window": meta.get("window", window),
                 "start_time": float(start_time or 0),
                 "end_time": float(end_time or 0),
                 "duration": float(duration),
+                "raw_duration": float(duration),
+                "effective_duration": float(duration),
+                "idle_trimmed_seconds": 0.0,
+                "has_input_estimate": False,
+                "capture_source": str(meta.get("capture_source", "") or "").strip(),
             }
         )
+        if record is None:
+            return False
+        self.activity_history.append(record)
         if len(self.activity_history) > self.ACTIVITY_HISTORY_LIMIT:
             self.activity_history = self.activity_history[-self.ACTIVITY_HISTORY_LIMIT :]
         self._save_activity_history()
@@ -3474,14 +4422,32 @@ class ScreenCompanionMemoryMixin:
         if duration < self.LIVE_ACTIVITY_MIN_DURATION_SECONDS:
             return None
 
-        activity_type, scene, window = self._parse_activity_marker(current_activity)
+        activity_meta = getattr(self, "current_activity_meta", None)
+        if isinstance(activity_meta, dict):
+            snapshot = dict(activity_meta)
+        else:
+            activity_type, scene, window = self._parse_activity_marker(current_activity)
+            snapshot = self._build_activity_record_meta(
+                activity_type=activity_type,
+                scene=scene,
+                window=window,
+            )
         return {
-            "type": activity_type,
-            "scene": scene,
-            "window": window,
+            **snapshot,
             "start_time": activity_start_time,
             "end_time": current_time,
             "duration": float(duration),
+            "raw_duration": float(duration),
+            "effective_duration": float(duration),
+            "idle_trimmed_seconds": 0.0,
+            "has_input_estimate": False,
+            "capture_source": str(
+                snapshot.get(
+                    "capture_source",
+                    getattr(self, "current_activity_source", "") or "",
+                )
+                or ""
+            ).strip(),
             "is_live": True,
         }
 

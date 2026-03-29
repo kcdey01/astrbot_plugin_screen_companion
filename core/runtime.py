@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from typing import Any
 
@@ -189,6 +190,10 @@ class ScreenCompanionRuntimeMixin:
             self.recent_user_activity = {}
         if not hasattr(self, "screen_analysis_traces") or self.screen_analysis_traces is None:
             self.screen_analysis_traces = []
+        if not hasattr(self, "current_activity_source"):
+            self.current_activity_source = ""
+        if not hasattr(self, "input_stats_daily") or self.input_stats_daily is None:
+            self.input_stats_daily = {}
         if not hasattr(self, "_learning_runtime_state") or self._learning_runtime_state is None:
             self._learning_runtime_state = {}
         if not hasattr(self, "_instance_token"):
@@ -212,6 +217,33 @@ class ScreenCompanionRuntimeMixin:
                 self.learning_storage,
                 "rest_reminder_state.json",
             )
+        if not hasattr(self, "input_stats_file"):
+            self.input_stats_file = os.path.join(
+                self.learning_storage,
+                "input_stats_daily.json",
+            )
+        if not hasattr(self, "_input_stats_lock") or self._input_stats_lock is None:
+            import threading
+
+            self._input_stats_lock = threading.Lock()
+        if not hasattr(self, "_input_stats_dirty"):
+            self._input_stats_dirty = False
+        if not hasattr(self, "_input_stats_listeners") or self._input_stats_listeners is None:
+            self._input_stats_listeners = []
+        if not hasattr(self, "_input_stats_status"):
+            self._input_stats_status = "disabled"
+        if not hasattr(self, "_input_stats_status_detail"):
+            self._input_stats_status_detail = "未启用本地输入统计"
+        if not hasattr(self, "_input_stats_last_flush_time"):
+            self._input_stats_last_flush_time = 0.0
+        if not hasattr(self, "_input_stats_last_move_time"):
+            self._input_stats_last_move_time = 0.0
+        if not hasattr(self, "_input_stats_last_mouse_position"):
+            self._input_stats_last_mouse_position = None
+        if not hasattr(self, "_input_stats_last_event_at"):
+            self._input_stats_last_event_at = ""
+        if not hasattr(self, "_away_pause_runtime_state") or self._away_pause_runtime_state is None:
+            self._away_pause_runtime_state = {}
         self._ensure_recording_runtime_state()
 
     def _ensure_recording_runtime_state(self) -> None:

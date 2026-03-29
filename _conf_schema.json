@@ -455,6 +455,102 @@
       "enable_mic_monitor": true
     }
   },
+  "enable_input_stats": {
+    "description": "启用本地输入统计",
+    "type": "bool",
+      "hint": "开启后会尝试监听全局键盘和鼠标输入，用来生成更像 KeyStats 的工作回顾。默认依赖已随基础安装提供，但系统可能仍需授予输入监听权限。",
+    "default": false,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "enable_background_activity_tracking": {
+    "description": "启用独立活动轨迹采集",
+    "type": "bool",
+    "hint": "开启后，即使没有启动自动观察，也会按固定间隔记录当前活动窗口，并尽量拆出应用 / 网站 / 页面轨迹。自动观察运行中会继续优先使用识屏轨迹。",
+    "default": false,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "background_activity_tracking_interval": {
+    "description": "独立轨迹采样间隔",
+    "type": "int",
+    "hint": "后台每隔多少秒采样一次当前活动窗口。值越小越细，值越大越省资源。",
+    "default": 15,
+    "min": 5,
+    "max": 3600,
+    "condition": {
+      "enabled": true,
+      "enable_background_activity_tracking": true
+    }
+  },
+  "input_stats_flush_interval": {
+    "description": "输入统计落盘间隔",
+    "type": "int",
+    "hint": "每隔多少秒把输入统计写回本地 JSON。值越小越实时，值越大越省磁盘 IO。",
+    "default": 60,
+    "min": 10,
+    "max": 3600,
+    "condition": {
+      "enabled": true,
+      "enable_input_stats": true
+    }
+  },
+  "enable_away_auto_pause": {
+    "description": "离开电脑时自动挂起观察",
+    "type": "bool",
+    "hint": "仅在启用本地输入统计后生效。非观影场景下，如果较长时间没有键鼠输入，就先暂停自动观察；检测到你回来后再自动恢复。",
+    "default": false,
+    "condition": {
+      "enabled": true,
+      "enable_input_stats": true
+    }
+  },
+  "away_auto_pause_threshold": {
+    "description": "自动挂起阈值",
+    "type": "int",
+    "hint": "连续多久没有输入后，认为用户已经暂时离开电脑前并挂起自动观察。",
+    "default": 1200,
+    "min": 300,
+    "max": 14400,
+    "condition": {
+      "enabled": true,
+      "enable_input_stats": true,
+      "enable_away_auto_pause": true
+    }
+  },
+  "away_long_notice_threshold": {
+    "description": "长时间离开提醒阈值",
+    "type": "int",
+    "hint": "离开时间超过这个阈值时，只额外发一次轻量提醒文案，然后继续安静等待。",
+    "default": 3600,
+    "min": 600,
+    "max": 86400,
+    "condition": {
+      "enabled": true,
+      "enable_input_stats": true,
+      "enable_away_auto_pause": true
+    }
+  },
+  "mask_activity_window_titles": {
+    "description": "活动页窗口标题脱敏",
+    "type": "bool",
+    "hint": "开启后，活动统计、主力窗口和工作轨迹里的窗口标题会统一脱敏，更适合把插件长期挂着使用。",
+    "default": false,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "activity_recognition_rules": {
+    "description": "活动识别自定义规则",
+    "type": "text",
+    "hint": "每行一条，格式为 app|关键词|显示名 或 site|关键词/域名|显示名。支持 # 注释，例如：app|cursor.exe|Cursor 或 site|docs.company.com|公司文档。",
+    "default": "",
+    "condition": {
+      "enabled": true
+    }
+  },
   "memory_threshold": {
     "description": "内存阈值",
     "type": "int",

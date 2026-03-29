@@ -79,6 +79,15 @@ class PluginConfig(BaseModel):
     enable_mic_monitor: bool = False
     mic_threshold: int = 60
     mic_check_interval: int = 5
+    enable_background_activity_tracking: bool = False
+    background_activity_tracking_interval: int = 15
+    enable_input_stats: bool = False
+    input_stats_flush_interval: int = 60
+    enable_away_auto_pause: bool = False
+    away_auto_pause_threshold: int = 1200
+    away_long_notice_threshold: int = 3600
+    mask_activity_window_titles: bool = False
+    activity_recognition_rules: str = ""
     memory_threshold: int = 80
     battery_threshold: int = 20
     admin_qq: str = ""
@@ -200,6 +209,42 @@ class PluginConfig(BaseModel):
             raise ValueError('mic_check_interval 不能小于 1 秒')
         return v
 
+    @field_validator('input_stats_flush_interval')
+    @classmethod
+    def validate_input_stats_flush_interval(cls, v):
+        if v < 10:
+            raise ValueError('input_stats_flush_interval 不能小于 10 秒')
+        if v > 3600:
+            raise ValueError('input_stats_flush_interval 不能大于 3600 秒')
+        return v
+
+    @field_validator('background_activity_tracking_interval')
+    @classmethod
+    def validate_background_activity_tracking_interval(cls, v):
+        if v < 5:
+            raise ValueError('background_activity_tracking_interval 不能小于 5 秒')
+        if v > 3600:
+            raise ValueError('background_activity_tracking_interval 不能大于 3600 秒')
+        return v
+
+    @field_validator('away_auto_pause_threshold')
+    @classmethod
+    def validate_away_auto_pause_threshold(cls, v):
+        if v < 300:
+            raise ValueError('away_auto_pause_threshold 不能小于 300 秒')
+        if v > 14400:
+            raise ValueError('away_auto_pause_threshold 不能大于 14400 秒')
+        return v
+
+    @field_validator('away_long_notice_threshold')
+    @classmethod
+    def validate_away_long_notice_threshold(cls, v):
+        if v < 600:
+            raise ValueError('away_long_notice_threshold 不能小于 600 秒')
+        if v > 86400:
+            raise ValueError('away_long_notice_threshold 不能大于 86400 秒')
+        return v
+
     @field_validator('memory_threshold')
     @classmethod
     def validate_memory_threshold(cls, v):
@@ -249,6 +294,11 @@ class PluginConfig(BaseModel):
                 f'录屏模式下，检查间隔不能小于录屏时长！\n'
                 f'当前配置：检查间隔 {self.check_interval}秒，录屏时长 {self.recording_duration_seconds}秒\n'
                 f'建议：将 check_interval 设置为 >= {self.recording_duration_seconds}，或者减小 recording_duration_seconds'
+            )
+        if self.away_long_notice_threshold <= self.away_auto_pause_threshold:
+            raise ValueError(
+                'away_long_notice_threshold 必须大于 away_auto_pause_threshold，'
+                '否则长时间离开提醒会和自动挂起同时触发。'
             )
         return self
 

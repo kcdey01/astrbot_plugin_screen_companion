@@ -24,6 +24,11 @@ const state = {
     settingsSearch: "",
     windowCandidates: [],
     activityStats: null,
+    activityFilters: {
+        search: "",
+        bucket: "all",
+        source: "all",
+    },
 };
 
 const elements = {
@@ -39,6 +44,8 @@ const elements = {
     lastUpdated: document.getElementById("lastUpdated"),
     healthMeta: document.getElementById("healthMeta"),
     healthGrid: document.getElementById("healthGrid"),
+    healthChecks: document.getElementById("healthChecks"),
+    healthWarnings: document.getElementById("healthWarnings"),
     diaryList: document.getElementById("diaryList"),
     diaryOverview: document.getElementById("diaryOverview"),
     diaryReflection: document.getElementById("diaryReflection"),
@@ -66,7 +73,25 @@ const elements = {
     todayActivityStats: document.getElementById("todayActivityStats"),
     totalActivityStats: document.getElementById("totalActivityStats"),
     activityCharts: document.getElementById("activityCharts"),
+    activityReview: document.getElementById("activityReview"),
+    activityInsights: document.getElementById("activityInsights"),
+    activityTopWindows: document.getElementById("activityTopWindows"),
+    activityTrend: document.getElementById("activityTrend"),
+    activityPulse: document.getElementById("activityPulse"),
+    activitySessionSummary: document.getElementById("activitySessionSummary"),
+    activitySessions: document.getElementById("activitySessions"),
+    activityInputStats: document.getElementById("activityInputStats"),
+    activityInputDays: document.getElementById("activityInputDays"),
+    activitySurfaceSummary: document.getElementById("activitySurfaceSummary"),
+    activityAppTrail: document.getElementById("activityAppTrail"),
+    activitySiteTrail: document.getElementById("activitySiteTrail"),
     recentActivities: document.getElementById("recentActivities"),
+    activitySearchInput: document.getElementById("activitySearchInput"),
+    activityBucketFilter: document.getElementById("activityBucketFilter"),
+    activitySourceFilter: document.getElementById("activitySourceFilter"),
+    clearActivityFiltersButton: document.getElementById("clearActivityFiltersButton"),
+    activityFilterSummary: document.getElementById("activityFilterSummary"),
+    activityMethodology: document.getElementById("activityMethodology"),
     runtimeMeta: document.getElementById("runtimeMeta"),
     runtimeSummary: document.getElementById("runtimeSummary"),
     runtimeStats: document.getElementById("runtimeStats"),
@@ -100,6 +125,10 @@ const elements = {
     navLinks: Array.from(document.querySelectorAll(".nav-link")),
     sections: Array.from(document.querySelectorAll(".section")),
 };
+
+function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 function escapeHtml(value) {
     return String(value ?? "")
@@ -165,11 +194,26 @@ async function apiFetch(url, options = {}) {
         headers["Content-Type"] = "application/json";
     }
 
-    const response = await fetch(url, {
-        credentials: "same-origin",
-        ...options,
-        headers,
-    });
+    let response;
+    try {
+        response = await fetch(url, {
+            credentials: "same-origin",
+            ...options,
+            headers,
+        });
+    } catch (error) {
+        const method = String(options.method || "GET").toUpperCase();
+        const networkError = new Error(
+            method === "GET"
+                ? `无法连接 WebUI 服务，请确认当前页面仍连着可用实例。(${method} ${url})`
+                : `请求没有拿到响应，WebUI 可能正在重启或地址刚被改动。(${method} ${url})`
+        );
+        networkError.code = "NETWORK_ERROR";
+        networkError.requestUrl = url;
+        networkError.requestMethod = method;
+        networkError.cause = error;
+        throw networkError;
+    }
 
     let payload = {};
     try {
@@ -189,6 +233,52 @@ async function apiFetch(url, options = {}) {
     }
 
     return payload;
+}
+
+function setFeedbackMessage(element, message, tone = "") {
+    if (!element) return;
+    element.textContent = message || "";
+    element.dataset.tone = tone || "";
+}
+
+function isNetworkError(error) {
+    return Boolean(error && error.code === "NETWORK_ERROR");
+}
+
+async function waitForWebUiRecovery({
+    attempts = 6,
+    delayMs = 900,
+} = {}) {
+    for (let index = 0; index < attempts; index += 1) {
+        try {
+            await sleep(index === 0 ? 250 : delayMs);
+            const health = await apiFetch("/api/health", { method: "GET" });
+            if (health?.success !== false) {
+                return true;
+            }
+        } catch (error) {
+            if (index === attempts - 1) return false;
+        }
+    }
+    return false;
+}
+
+function buildSettingsSaveFailureMessage(error, context = {}) {
+    const changedCount = Number(context.changedCount || 0);
+    const touchesWebui = Boolean(context.touchesWebui);
+    if (isNetworkError(error)) {
+        return touchesWebui
+            ? `保存请求已发出，但当前 WebUI 可能正在按新配置重启。请稍等几秒后刷新；如果改了 host 或 port，请按新地址访问。`
+            : `保存时没有拿到响应。通常是当前 WebUI 实例短暂失联，请刷新后确认刚才改的 ${changedCount || "这些"} 项是否已经生效。`;
+    }
+    return `保存失败: ${error.message}`;
+}
+
+function buildRuntimeSaveFailureMessage(error) {
+    if (isNetworkError(error)) {
+        return "运行设置提交后没有拿到响应，WebUI 可能短暂重连中。请稍等几秒刷新，再确认设置是否已生效。";
+    }
+    return `保存失败: ${error.message}`;
 }
 
 function showLoginForm(message = "") {
@@ -273,11 +363,18 @@ function renderActivityMetricItem(type, label, value, hint) {
 }
 
 function renderActivityMetricGrid(stats) {
+    const hasInputEstimate = Boolean(stats?.has_input_estimate);
+    const workValue = hasInputEstimate ? getActivityDisplayWorkTime(stats) : (stats?.work_time || "0分钟");
+    const workHint = hasInputEstimate
+        ? `已扣除 ${stats?.idle_trimmed_time || "0分钟"} 空闲`
+        : "专注投入";
+    const totalValue = hasInputEstimate ? getActivityDisplayTotalTime(stats) : (stats?.total_time || "0分钟");
+    const totalHint = hasInputEstimate ? "工作时段已按输入在场感折算" : "当前统计周期";
     return [
-        renderActivityMetricItem("work", "工作时间", stats.work_time || "0分钟", "专注投入"),
+        renderActivityMetricItem("work", hasInputEstimate ? "有效工作" : "工作时间", workValue, workHint),
         renderActivityMetricItem("play", "摸鱼时间", stats.play_time || "0分钟", "娱乐放松"),
         renderActivityMetricItem("other", "其他时间", stats.other_time || "0分钟", "零散切换"),
-        renderActivityMetricItem("total", "总时间", stats.total_time || "0分钟", "当前统计周期"),
+        renderActivityMetricItem("total", "总时间", totalValue, totalHint),
     ].join("");
 }
 
@@ -297,10 +394,35 @@ function renderOverviewPill(label, value, tone = "") {
     `;
 }
 
-function buildActivityChartCard(title, stats) {
-    const totalSeconds = Number(stats.total_seconds || 0);
+function getActivityDisplayTotalSeconds(stats) {
+    const hasInputEstimate = Boolean(stats?.has_input_estimate);
+    if (!hasInputEstimate) return Number(stats?.total_seconds || 0);
+    return Number(stats?.display_total_seconds ?? stats?.total_seconds ?? 0);
+}
+
+function getActivityDisplayTotalTime(stats) {
+    const hasInputEstimate = Boolean(stats?.has_input_estimate);
+    if (!hasInputEstimate) return stats?.total_time || "0分钟";
+    return stats?.display_total_time || stats?.total_time || "0分钟";
+}
+
+function getActivityDisplayWorkSeconds(stats) {
+    const hasInputEstimate = Boolean(stats?.has_input_estimate);
+    if (!hasInputEstimate) return Number(stats?.work_seconds || 0);
+    return Number(stats?.effective_work_seconds ?? stats?.work_seconds ?? 0);
+}
+
+function getActivityDisplayWorkTime(stats) {
+    const hasInputEstimate = Boolean(stats?.has_input_estimate);
+    if (!hasInputEstimate) return stats?.work_time || "0分钟";
+    return stats?.effective_work_time || stats?.work_time || "0分钟";
+}
+
+function buildActivitySegments(stats) {
+    const hasInputEstimate = Boolean(stats?.has_input_estimate);
+    const totalSeconds = getActivityDisplayTotalSeconds(stats);
     const segments = [
-        { key: "work", label: "工作", seconds: Number(stats.work_seconds || 0), value: stats.work_time || "0分钟" },
+        { key: "work", label: hasInputEstimate ? "有效工作" : "工作", seconds: getActivityDisplayWorkSeconds(stats), value: getActivityDisplayWorkTime(stats) },
         { key: "play", label: "摸鱼", seconds: Number(stats.play_seconds || 0), value: stats.play_time || "0分钟" },
         { key: "other", label: "其他", seconds: Number(stats.other_seconds || 0), value: stats.other_time || "0分钟" },
     ];
@@ -310,6 +432,13 @@ function buildActivityChartCard(title, stats) {
             .map((segment) => `<span class="activity-bar-segment activity-bar-segment--${segment.key}" style="width:${(segment.seconds / totalSeconds) * 100}%"></span>`)
             .join("")
         : '<span class="activity-bar-segment activity-bar-segment--empty" style="width:100%"></span>';
+    return { totalSeconds, segments, barHtml };
+}
+
+function buildActivityChartCard(title, stats) {
+    const hasInputEstimate = Boolean(stats?.has_input_estimate);
+    const totalLabel = getActivityDisplayTotalTime(stats);
+    const { totalSeconds, segments, barHtml } = buildActivitySegments(stats);
     const legendHtml = segments.map((segment) => {
         const ratio = totalSeconds > 0 ? `${Math.round((segment.seconds / totalSeconds) * 100)}%` : "0%";
         return `
@@ -321,11 +450,14 @@ function buildActivityChartCard(title, stats) {
             </li>
         `;
     }).join("");
+    const summaryLabel = hasInputEstimate
+        ? `总计 ${totalLabel} · 已扣空闲 ${stats?.idle_trimmed_time || "0分钟"}`
+        : `总计 ${totalLabel}`;
     return `
         <article class="activity-breakdown-card">
             <div class="activity-breakdown-head">
                 <strong>${escapeHtml(title)}</strong>
-                <span class="panel-subtle">总计 ${escapeHtml(stats.total_time || "0分钟")}</span>
+                <span class="panel-subtle">${escapeHtml(summaryLabel)}</span>
             </div>
             <div class="activity-breakdown-bar">${barHtml}</div>
             <ul class="activity-legend">${legendHtml}</ul>
@@ -339,6 +471,380 @@ function renderActivityCharts(today, total) {
         buildActivityChartCard("今日配比", today),
         buildActivityChartCard("累计配比", total),
     ].join("");
+}
+
+function renderActivityReviewSection(review) {
+    const summaryCards = review.summary_cards || [];
+    const insights = review.insights || [];
+
+    if (!elements.activityReview || !elements.activityInsights) return;
+
+    if (summaryCards.length === 0) {
+        elements.activityReview.innerHTML = "<div class='empty-state'><strong>暂无回顾</strong><p>积累出更多活动片段后，这里会给出专注与切换总结</p></div>";
+        elements.activityInsights.innerHTML = "";
+        return;
+    }
+
+    elements.activityReview.innerHTML = summaryCards.map((item) => {
+        const toneClass = item.tone ? ` activity-review-card--${item.tone}` : "";
+        return `
+            <article class="activity-review-card${toneClass}">
+                <span class="panel-label">${escapeHtml(item.label || "指标")}</span>
+                <strong>${escapeHtml(item.value || "暂无")}</strong>
+                <p>${escapeHtml(item.detail || "")}</p>
+            </article>
+        `;
+    }).join("");
+
+    elements.activityInsights.innerHTML = insights.map((item) => `
+        <article class="activity-insight-card">
+            <p>${escapeHtml(item)}</p>
+        </article>
+    `).join("");
+}
+
+function renderActivityTopWindows(review) {
+    if (!elements.activityTopWindows) return;
+    const topWindows = review.top_windows || [];
+    const rangeLabel = review.range_label || "今天";
+
+    if (topWindows.length === 0) {
+        elements.activityTopWindows.innerHTML = "<div class='empty-state'><strong>暂无窗口分布</strong><p>有了更多活动样本后，这里会显示时间主要花在哪些窗口</p></div>";
+        return;
+    }
+
+    elements.activityTopWindows.innerHTML = topWindows.map((item, index) => `
+        <article class="activity-window-card">
+            <div class="activity-window-rank">${index + 1}</div>
+            <div class="activity-window-main">
+                <h3 class="list-item-title">${escapeHtml(item.window || "未命名窗口")}</h3>
+                <p class="memory-meta">${escapeHtml(rangeLabel)} · ${escapeHtml(item.type || "其他")} · ${escapeHtml(String(item.sessions || 0))} 段活动 · ${escapeHtml(item.share || "0%")}</p>
+            </div>
+            <strong>${escapeHtml(item.duration || "0分钟")}</strong>
+        </article>
+    `).join("");
+}
+
+function renderActivityTrend(review) {
+    if (!elements.activityTrend) return;
+    const trend = review.trend || [];
+
+    if (trend.length === 0) {
+        elements.activityTrend.innerHTML = "<div class='empty-state'><strong>暂无趋势数据</strong><p>开始使用插件后，这里会生成最近几天的活动节奏图</p></div>";
+        return;
+    }
+
+    elements.activityTrend.innerHTML = trend.map((day) => {
+        const { barHtml } = buildActivitySegments(day);
+        const sessionCount = Number(day.session_count || 0);
+        const hasInputEstimate = Boolean(day.has_input_estimate);
+        const totalLabel = getActivityDisplayTotalTime(day);
+        const ratioLabel = hasInputEstimate ? (day.effective_work_ratio || day.work_ratio || "0%") : (day.work_ratio || "0%");
+        const metaLabel = hasInputEstimate
+            ? `有效工作 ${ratioLabel} · ${String(sessionCount)} 段活动 · 扣空闲 ${day.idle_trimmed_time || "0分钟"}`
+            : `工作 ${ratioLabel} · ${String(sessionCount)} 段活动`;
+        return `
+            <article class="activity-trend-row">
+                <div class="activity-trend-head">
+                    <strong>${escapeHtml(day.label || day.date || "--")}</strong>
+                    <span class="activity-trend-total">${escapeHtml(totalLabel)}</span>
+                </div>
+                <div class="activity-breakdown-bar activity-breakdown-bar--compact">${barHtml}</div>
+                <p class="activity-trend-meta">${escapeHtml(metaLabel)}</p>
+            </article>
+        `;
+    }).join("");
+}
+
+function renderInputStatsSection(inputStats) {
+    if (!elements.activityInputStats || !elements.activityInputDays) return;
+
+    if (!inputStats || !inputStats.enabled) {
+        elements.activityInputStats.innerHTML = "<div class='empty-state'><strong>未启用本地输入统计</strong><p>如果你想看更像 KeyStats 的键鼠节奏，可以在配置中心开启这个可选功能。</p></div>";
+        elements.activityInputDays.innerHTML = "";
+        return;
+    }
+
+    if (!inputStats.available && ["missing_dependency", "error"].includes(String(inputStats.status || ""))) {
+        elements.activityInputStats.innerHTML = `<div class='empty-state'><strong>输入统计暂不可用</strong><p>${escapeHtml(inputStats.detail || "本地输入统计没有成功启动。")}</p></div>`;
+        elements.activityInputDays.innerHTML = "";
+        return;
+    }
+
+    const today = inputStats.today || {};
+    const recentDays = inputStats.recent_days || [];
+    const statusText = inputStats.detail || "等待输入统计状态";
+
+    const cards = [
+        { label: "今日按键", value: today.keys_label || "0 次", detail: "键盘按下次数" },
+        { label: "今日点击", value: today.clicks_label || "0 次", detail: "鼠标点击次数" },
+        { label: "滚轮步数", value: today.scroll_steps_label || "0 格", detail: "滚轮滚动累计" },
+        { label: "鼠标移动", value: today.move_pixels_label || "0 px", detail: `活跃 ${today.active_minutes_label || "0 分钟"}` },
+        { label: "高峰时段", value: today.peak_hour_label || "暂无", detail: today.last_event_time_label ? `最近输入 ${today.last_event_time_label}` : statusText },
+        { label: "近 7 天输入", value: inputStats.window_total_inputs_label || "0 次", detail: `累计活跃 ${inputStats.window_active_minutes_label || "0 分钟"}` },
+    ];
+
+    elements.activityInputStats.innerHTML = cards.map((item) => `
+        <article class="activity-input-card">
+            <span class="panel-label">${escapeHtml(item.label)}</span>
+            <strong>${escapeHtml(item.value)}</strong>
+            <p>${escapeHtml(item.detail)}</p>
+        </article>
+    `).join("");
+
+    if (recentDays.length === 0) {
+        elements.activityInputDays.innerHTML = "";
+        return;
+    }
+
+    elements.activityInputDays.innerHTML = recentDays.map((item) => {
+        const activeMinutes = Number(item.active_minutes || 0);
+        const activeWidth = activeMinutes > 0 ? Math.max(6, Math.min(100, activeMinutes * 2)) : 0;
+        return `
+            <article class="activity-input-day">
+                <div class="activity-input-day-head">
+                    <strong>${escapeHtml(item.label || item.date || "--")}</strong>
+                    <span>${escapeHtml(item.total_inputs_label || "0 次")}</span>
+                </div>
+                <div class="activity-input-day-bar">
+                    <span class="activity-input-day-bar-fill" style="width:${activeWidth}%"></span>
+                </div>
+                <p>${escapeHtml(`按键 ${item.keys_label || "0 次"} / 点击 ${item.clicks_label || "0 次"} / 活跃 ${item.active_minutes_label || "0 分钟"}`)}</p>
+            </article>
+        `;
+    }).join("");
+}
+
+function renderActivityPulse(pulse) {
+    if (!elements.activityPulse) return;
+
+    if (!pulse || !pulse.summary) {
+        elements.activityPulse.innerHTML = "<div class='empty-state'><strong>等待活动脉搏</strong><p>开始使用插件后，这里会把活动、输入和隐私状态自动串成一个更清晰的当前视角。</p></div>";
+        return;
+    }
+
+    const toneClass = pulse.tone ? ` activity-pulse-card--${escapeHtml(pulse.tone)}` : "";
+    const meta = Array.isArray(pulse.meta) ? pulse.meta.filter(Boolean) : [];
+    const metaHtml = meta.length
+        ? `<div class="observation-tags">${meta.map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join("")}</div>`
+        : "";
+
+    elements.activityPulse.innerHTML = `
+        <article class="activity-pulse-card${toneClass}">
+            <div class="activity-pulse-head">
+                <span class="activity-pulse-badge">${escapeHtml(pulse.label || "工作脉搏")}</span>
+                <strong>${escapeHtml(pulse.summary || "等待活动脉搏")}</strong>
+            </div>
+            <p class="activity-pulse-detail">${escapeHtml(pulse.detail || "")}</p>
+            ${metaHtml}
+        </article>
+    `;
+}
+
+function renderActivitySessions(sessionData) {
+    if (!elements.activitySessionSummary || !elements.activitySessions) return;
+
+    const sessions = Array.isArray(sessionData?.filtered_items)
+        ? sessionData.filtered_items
+        : (Array.isArray(sessionData?.items) ? sessionData.items : []);
+    const summaryPills = [
+        renderOverviewPill("工作段", sessionData?.count_label || "0 段", "good"),
+        renderOverviewPill("深度专注", sessionData?.focus_count_label || "0 段", "good"),
+        renderOverviewPill("最长工作段", sessionData?.longest_duration || "0分钟", ""),
+        renderOverviewPill("隐私模式", sessionData?.privacy_masked ? "窗口脱敏" : "原始标题", sessionData?.privacy_masked ? "muted" : ""),
+    ];
+    if (sessionData?.has_input_estimate) {
+        summaryPills.splice(
+            3,
+            0,
+            renderOverviewPill("有效总计", sessionData?.total_time || "0分钟", "good"),
+            renderOverviewPill("扣除空闲", sessionData?.idle_trimmed_total_time || "0分钟", "muted"),
+        );
+    }
+    elements.activitySessionSummary.innerHTML = summaryPills.join("");
+
+    if (sessions.length === 0) {
+        elements.activitySessions.innerHTML = "<div class='empty-state'><strong>当前筛选下没有工作段</strong><p>可以换个关键词、类型或来源，看看别的工作轨迹。</p></div>";
+        return;
+    }
+
+    elements.activitySessions.innerHTML = sessions.map((item) => {
+        const toneClass = item.tone ? ` activity-session-card--${escapeHtml(item.tone)}` : "";
+        const tags = [
+            item.top_window,
+            item.top_app,
+            item.top_site,
+            item.source_mix_label,
+            item.switch_count_label,
+            item.entry_count_label,
+        ].filter(Boolean);
+        const effectiveNote = item.effective_note
+            ? `<p class="memory-meta">${escapeHtml(item.effective_note)}</p>`
+            : "";
+        return `
+            <article class="activity-session-card${toneClass}">
+                <div class="activity-session-head">
+                    <div>
+                        <h3 class="list-item-title">${escapeHtml(item.state_label || "工作段")}</h3>
+                        <p class="memory-meta">${escapeHtml(`${item.range_label || "时间未知"} · ${item.dominant_label || "其他"} · 工作占比 ${item.work_ratio || "0%"}`)}</p>
+                    </div>
+                    <strong>${escapeHtml(item.duration || "0分钟")}</strong>
+                </div>
+                <div class="observation-tags">${tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
+                <p class="memory-meta">${escapeHtml(item.summary || "")}</p>
+                ${effectiveNote}
+                <p class="memory-meta">${escapeHtml(item.continuation_label || "")}</p>
+            </article>
+        `;
+    }).join("");
+}
+
+function renderActivitySurfaceTrail(surfaceData) {
+    if (!elements.activitySurfaceSummary || !elements.activityAppTrail || !elements.activitySiteTrail) return;
+
+    const summary = surfaceData?.summary || {};
+    elements.activitySurfaceSummary.innerHTML = [
+        renderOverviewPill("应用数", summary.app_count_label || "0 个应用", ""),
+        renderOverviewPill("站点数", summary.site_count_label || "0 个站点", ""),
+        renderOverviewPill("轨迹总计", summary.effective_time || "0分钟", "good"),
+        renderOverviewPill("扣除空闲", summary.idle_trimmed_time || "0分钟", summary.estimate_enabled ? "muted" : ""),
+    ].join("");
+
+    const renderRows = (rows, emptyTitle, emptyBody) => {
+        if (!Array.isArray(rows) || rows.length === 0) {
+            return `<div class="empty-state"><strong>${escapeHtml(emptyTitle)}</strong><p>${escapeHtml(emptyBody)}</p></div>`;
+        }
+        return rows.map((item) => {
+            const tags = [
+                item.type,
+                item.share,
+                `${item.sessions || 0} 段`,
+                item.domain || "",
+            ].filter(Boolean);
+            const note = item.idle_trimmed_time && item.idle_trimmed_time !== "0分0秒"
+                ? `，其中扣除了约 ${item.idle_trimmed_time} 空闲`
+                : "";
+            return `
+                <article class="activity-surface-card">
+                    <div class="activity-surface-head">
+                        <div>
+                            <h3 class="list-item-title">${escapeHtml(item.label || "未命名")}</h3>
+                            <p class="memory-meta">${escapeHtml(`${item.duration || "0分钟"} · 最近出现 ${item.last_seen || "未知"}${note}`)}</p>
+                        </div>
+                        <strong>${escapeHtml(item.duration || "0分钟")}</strong>
+                    </div>
+                    <div class="observation-tags">${tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
+                </article>
+            `;
+        }).join("");
+    };
+
+    elements.activityAppTrail.innerHTML = renderRows(
+        surfaceData?.apps,
+        "今天还没有明显的应用轨迹",
+        "继续积累活动记录后，这里会收束出主力应用。"
+    );
+    elements.activitySiteTrail.innerHTML = renderRows(
+        surfaceData?.sites,
+        "今天还没有明显的网站轨迹",
+        "如果你主要在浏览器里工作，这里会逐渐显出主力站点。"
+    );
+}
+
+function normalizeSearchText(value) {
+    return String(value ?? "").trim().toLowerCase();
+}
+
+function getActivitySourceLabel(source) {
+    const mapping = {
+        screen_analysis: "识屏轨迹",
+        background_tracker: "独立轨迹",
+    };
+    return mapping[String(source || "").trim()] || "其他来源";
+}
+
+function activityRecordMatchesFilters(activity, filters) {
+    const bucket = String(filters?.bucket || "all");
+    const source = String(filters?.source || "all");
+    const search = normalizeSearchText(filters?.search);
+    const activityBucket = String(activity?.bucket_key || "other");
+    const activitySource = String(activity?.capture_source || "");
+    if (bucket !== "all" && activityBucket !== bucket) return false;
+    if (source !== "all" && activitySource !== source) return false;
+    if (!search) return true;
+
+    const haystacks = [
+        activity?.type,
+        activity?.scene,
+        activity?.window,
+        activity?.app_name,
+        activity?.site_label,
+        activity?.site_domain,
+        activity?.page_title,
+        activity?.resource_label,
+        activity?.capture_source_label,
+    ];
+    return haystacks.some((item) => normalizeSearchText(item).includes(search));
+}
+
+function activitySessionMatchesFilters(session, filters) {
+    const bucket = String(filters?.bucket || "all");
+    const source = String(filters?.source || "all");
+    const search = normalizeSearchText(filters?.search);
+    const sessionBucket = String(session?.dominant_bucket || "other");
+    const sessionSource = String(session?.primary_capture_source || "");
+    if (bucket !== "all" && sessionBucket !== bucket) return false;
+    if (source !== "all" && sessionSource !== source) return false;
+    if (!search) return true;
+
+    const haystacks = [
+        session?.state_label,
+        session?.dominant_label,
+        session?.top_window,
+        session?.top_app,
+        session?.top_site,
+        session?.summary,
+        session?.primary_capture_source_label,
+        session?.source_mix_label,
+    ];
+    return haystacks.some((item) => normalizeSearchText(item).includes(search));
+}
+
+function getFilteredActivityView(data) {
+    const recentActivities = Array.isArray(data?.recent_activities) ? data.recent_activities : [];
+    const sessionItems = Array.isArray(data?.sessions?.items) ? data.sessions.items : [];
+    const filters = state.activityFilters || {};
+    return {
+        recentActivities,
+        sessionItems,
+        filteredRecentActivities: recentActivities.filter((item) => activityRecordMatchesFilters(item, filters)),
+        filteredSessionItems: sessionItems.filter((item) => activitySessionMatchesFilters(item, filters)),
+    };
+}
+
+function renderActivityMethodology(review, activityView) {
+    if (!elements.activityMethodology) return;
+    const cards = Array.isArray(review?.methodology) ? review.methodology : [];
+    const filteredActivityCount = Number(activityView?.filteredRecentActivities?.length || 0);
+    const filteredSessionCount = Number(activityView?.filteredSessionItems?.length || 0);
+    const totalActivityCount = Number(activityView?.recentActivities?.length || 0);
+    const totalSessionCount = Number(activityView?.sessionItems?.length || 0);
+
+    const summaryCard = `
+        <article class="helper-card">
+            <strong>当前筛选结果</strong>
+            <p>最近活动显示 ${filteredActivityCount} / ${totalActivityCount} 条，工作段显示 ${filteredSessionCount} / ${totalSessionCount} 段。筛选只影响回顾浏览，不会改动原始统计。</p>
+        </article>
+    `;
+
+    const detailCards = cards.map((item) => `
+        <article class="helper-card">
+            <strong>${escapeHtml(item.title || "统计说明")}</strong>
+            <p>${escapeHtml(item.detail || "")}</p>
+        </article>
+    `).join("");
+
+    elements.activityMethodology.innerHTML = summaryCard + detailCards;
 }
 
 function getSettingMeta(key) {
@@ -500,6 +1006,13 @@ function renderRuntimeInsights(runtime) {
 
     const insights = [
         {
+            title: "工作脉搏",
+            body: runtime.activity_pulse?.summary
+                ? `${runtime.activity_pulse.summary} ${runtime.activity_pulse.detail || ""}`.trim()
+                : "活动页会把当前活动、输入在场感和隐私状态整合成一个更像 Work_Review 的工作脉搏视角。",
+            actions: [],
+        },
+        {
             title: "\u8bc6\u5c4f\u6a21\u5f0f",
             body: runtime.screen_recognition_mode
                 ? "\u5f53\u524d\u4e3a\u5f55\u5c4f\u89c6\u9891\u8bc6\u522b\u6a21\u5f0f\u3002\u63d2\u4ef6\u4f1a\u5148\u7528 ffmpeg \u5f55\u5236\u6700\u8fd1\u4e00\u6bb5\u684c\u9762 mp4\uff0c\u518d\u628a\u89c6\u9891 base64 \u4f5c\u4e3a\u591a\u6a21\u6001\u6d88\u606f\u53d1\u7ed9\u6a21\u578b\u7406\u89e3\u3002"
@@ -541,7 +1054,56 @@ function renderRuntimeInsights(runtime) {
                 : "\u5f53\u524d\u4e0d\u4f1a\u4fdd\u7559\u672c\u5730\u8bc6\u522b\u7d20\u6750\uff0c\u66f4\u7701\u7a7a\u95f4\uff0c\u4e5f\u66f4\u504f\u9690\u79c1\u53cb\u597d\u3002",
             actions: [],
         },
+        {
+            title: "\u672c\u5730\u8f93\u5165\u7edf\u8ba1",
+            body: runtime.input_stats?.enabled
+                ? `${runtime.input_stats?.detail || "\u672c\u5730\u8f93\u5165\u7edf\u8ba1\u5df2\u5f00\u542f\u3002"}${runtime.input_stats?.presence_label ? ` \u5f53\u524d${runtime.input_stats.presence_label}\u3002` : ""}${runtime.input_stats?.today?.keys_label ? ` \u4eca\u65e5\u6309\u952e ${runtime.input_stats.today.keys_label}\uff0c\u70b9\u51fb ${runtime.input_stats.today.clicks_label || "0 \u6b21"}\u3002` : ""}`
+                : "\u9ed8\u8ba4\u5173\u95ed\u3002\u5f00\u542f\u540e\u4f1a\u8bb0\u5f55\u952e\u76d8\u548c\u9f20\u6807\u8f93\u5165\uff0c\u7528\u6765\u751f\u6210\u66f4\u50cf KeyStats \u7684\u8f7b\u91cf\u56de\u987e\u3002",
+            actions: [{ label: "\u524d\u5f80\u672c\u5730\u7edf\u8ba1\u8bbe\u7f6e", action: "open-analytics-group" }],
+        },
+        {
+            title: "\u72ec\u7acb\u6d3b\u52a8\u8f68\u8ff9\u91c7\u96c6",
+            body: runtime.background_activity_tracking?.enabled
+                ? runtime.background_activity_tracking?.active
+                    ? `\u5df2\u542f\u7528\uff0c\u5f53\u524d\u6b63\u5728\u4ee5 ${runtime.background_activity_tracking.interval || 15} \u79d2\u7684\u8282\u594f\u91c7\u6837\u6d3b\u52a8\u7a97\u53e3\u3002`
+                    : "\u5df2\u542f\u7528\uff0c\u4f46\u76ee\u524d\u8bc6\u5c4f\u6216\u7a97\u53e3\u966a\u4f34\u6b63\u5728\u8fd0\u884c\uff0c\u6240\u4ee5\u72ec\u7acb\u8f68\u8ff9\u6682\u65f6\u8ba9\u4f4d\u7ed9\u66f4\u4e30\u5bcc\u7684\u8bc6\u5c4f\u8f68\u8ff9\u3002"
+                : "\u9ed8\u8ba4\u5173\u95ed\u3002\u6253\u5f00\u540e\uff0c\u5373\u4f7f\u6ca1\u6709\u542f\u52a8\u81ea\u52a8\u89c2\u5bdf\uff0c\u4e5f\u4f1a\u6301\u7eed\u8bb0\u5f55\u5e94\u7528 / \u7ad9\u70b9 / \u9875\u9762\u8f68\u8ff9\u3002",
+            actions: [{ label: "\u8c03\u6574\u8f68\u8ff9\u91c7\u96c6", action: "open-analytics-group" }],
+        },
+        {
+            title: "离开自动挂起",
+            body: runtime.away_pause?.enabled
+                ? runtime.away_pause?.active
+                    ? `${runtime.away_pause.detail || "当前已自动挂起自动观察。"}${runtime.away_pause.scene_label ? ` 离开前场景：${runtime.away_pause.scene_label}。` : ""}`
+                    : "已启用。非观影场景下，如果较长时间没有键鼠输入，会先暂停自动观察；检测到你回来继续操作后再自动恢复。"
+                : "默认关闭。适合需要长时间挂着自动观察、但又希望用户离开工位时先退到旁边的场景。",
+            actions: [{ label: "调整挂起设置", action: "open-analytics-group" }],
+        },
+        {
+            title: "活动隐私",
+            body: runtime.mask_activity_window_titles
+                ? "已开启窗口标题脱敏。活动统计、主力窗口和工作轨迹会统一隐藏敏感标题，更适合日常一直挂着用。"
+                : "当前会显示原始窗口标题。如果你更在意隐私，可以在本地统计设置里开启统一脱敏。",
+            actions: [{ label: "调整统计设置", action: "open-analytics-group" }],
+        },
     ];
+
+    const activityRuleSummary = runtime.activity_recognition_rules || {};
+    const activityRuleCount = Number(activityRuleSummary.total_rules || 0);
+    const invalidRuleLines = Number(activityRuleSummary.invalid_lines || 0);
+    if (activityRuleCount > 0 || invalidRuleLines > 0) {
+        const baseBody = activityRuleCount > 0
+            ? `已启用 ${activityRuleCount} 条自定义规则（应用 ${Number(activityRuleSummary.app_rules || 0)} 条，站点 ${Number(activityRuleSummary.site_rules || 0)} 条）。改完规则后，旧活动也会按新规则重新归类。`
+            : "当前还没有生效的自定义规则。";
+        const detailBody = invalidRuleLines > 0
+            ? `${baseBody} 另有 ${invalidRuleLines} 行格式未生效，请检查是否写成 app|关键词|显示名 或 site|关键词|显示名。`
+            : baseBody;
+        insights.push({
+            title: "轨迹识别规则",
+            body: detailBody,
+            actions: [{ label: "调整统计设置", action: "open-analytics-group" }],
+        });
+    }
 
     insights.forEach((item) => {
         const card = document.createElement("article");
@@ -608,7 +1170,7 @@ function renderRuntimeMedia(runtime) {
         card.className = "runtime-media-card";
         const title = item.kind === "video" ? "最新录屏" : "最新截图";
         const meta = item.available
-            ? `${formatDateTime(item.updated_at)} 路 ${formatBytes(item.size_bytes)}`
+            ? `${formatDateTime(item.updated_at)} · ${formatBytes(item.size_bytes)}`
             : (item.message || "暂无可预览素材");
         let preview = '<div class="empty-state"><strong>暂无可预览素材</strong></div>';
         if (item.available && item.url) {
@@ -641,6 +1203,8 @@ function renderRuntimeMedia(runtime) {
 
 function renderHealthChecks() {
     elements.healthGrid.innerHTML = "";
+    if (elements.healthChecks) elements.healthChecks.innerHTML = "";
+    if (elements.healthWarnings) elements.healthWarnings.innerHTML = "";
     if (!state.health) {
         elements.healthMeta.textContent = "尚未完成服务自检。";
         elements.healthGrid.appendChild(cloneEmptyState());
@@ -648,7 +1212,14 @@ function renderHealthChecks() {
     }
 
     const health = state.health;
-    elements.healthMeta.textContent = `最近检查 ${formatDateTime(health.checked_at)} | 服务: ${health.service || "unknown"}`;
+    const warningCount = Number(health.warning_count || 0);
+    const errorCount = Number(health.error_count || 0);
+    const issueSummary = errorCount > 0
+        ? `发现 ${errorCount} 个高优先问题`
+        : warningCount > 0
+            ? `发现 ${warningCount} 个需要关注的提醒`
+            : "当前自检未发现明显异常";
+    elements.healthMeta.textContent = `最近检查 ${formatDateTime(health.checked_at)} | 服务: ${health.service || "unknown"} | ${issueSummary}`;
     const cards = [
         ["健康状态", health.status || "unknown"],
         ["实例版本", health.version || "--"],
@@ -666,6 +1237,42 @@ function renderHealthChecks() {
         card.innerHTML = `<span class="panel-label">${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>`;
         elements.healthGrid.appendChild(card);
     });
+
+    const statusOrder = { error: 0, warn: 1, ok: 2 };
+    const checks = (Array.isArray(health.checks) ? health.checks : []).slice().sort((left, right) => {
+        const leftRank = statusOrder[String(left?.status || "ok")] ?? 9;
+        const rightRank = statusOrder[String(right?.status || "ok")] ?? 9;
+        return leftRank - rightRank;
+    });
+    if (elements.healthChecks) {
+        if (!checks.length) {
+            elements.healthChecks.innerHTML = "<div class='empty-state'><strong>暂无详细检查项</strong><p>刷新后会重新收集静态资源、目录、轨迹和输入状态。</p></div>";
+        } else {
+            elements.healthChecks.innerHTML = checks.map((item) => `
+                <article class="health-check-card health-check-card--${escapeHtml(item.status || "ok")}">
+                    <div class="health-check-head">
+                        <strong>${escapeHtml(item.title || "检查项")}</strong>
+                        <span class="settings-badge">${escapeHtml(item.status_label || item.status || "ok")}</span>
+                    </div>
+                    <p>${escapeHtml(item.detail || "")}</p>
+                </article>
+            `).join("");
+        }
+    }
+
+    const recommendations = Array.isArray(health.recommendations) ? health.recommendations : [];
+    if (elements.healthWarnings) {
+        if (!recommendations.length) {
+            elements.healthWarnings.innerHTML = "";
+        } else {
+            elements.healthWarnings.innerHTML = recommendations.map((item) => `
+                <article class="helper-card">
+                    <strong>${escapeHtml(item.title || "建议")}</strong>
+                    <p>${escapeHtml(item.body || "")}</p>
+                </article>
+            `).join("");
+        }
+    }
 }
 
 function renderSettingsHelper(activeGroup, currentValues) {
@@ -798,7 +1405,7 @@ function renderSettingsGroups() {
         button.className = "settings-group-button";
         if (group.id === state.activeSettingsGroup) button.classList.add("active");
         button.innerHTML = `
-            <strong>${escapeHtml(group.title)}${groupDirtyCount ? ` 路 ${groupDirtyCount}` : ""}</strong>
+            <strong>${escapeHtml(group.title)}${groupDirtyCount ? ` · ${groupDirtyCount}` : ""}</strong>
             <span>${escapeHtml(group.description || "")}</span>
         `;
         button.addEventListener("click", () => {
@@ -821,6 +1428,7 @@ function renderSettingsForm() {
         elements.settingsHelper.classList.add("hidden");
         elements.settingsHelper.innerHTML = "";
         elements.settingsForm.appendChild(cloneEmptyState());
+        updateSettingsActionButtons(null);
         return;
     }
 
@@ -837,6 +1445,7 @@ function renderSettingsForm() {
         empty.querySelector("strong").textContent = "当前分组没有可编辑项";
         empty.querySelector("p").textContent = "可能是被前置条件隐藏了，也可能是筛选词过于严格。";
         elements.settingsForm.appendChild(empty);
+        updateSettingsActionButtons(activeGroup);
         return;
     }
 
@@ -874,7 +1483,32 @@ function renderSettingsForm() {
         wrapper.append(header, hint, input);
         elements.settingsForm.appendChild(wrapper);
     });
+
+    updateSettingsActionButtons(activeGroup);
 }
+
+function getActiveSettingsGroup() {
+    const visibleGroups = getVisibleSettingsGroups();
+    return visibleGroups.find((group) => group.id === state.activeSettingsGroup) || null;
+}
+
+function updateSettingsActionButtons(activeGroup = null) {
+    const group = activeGroup || getActiveSettingsGroup();
+    const groupFields = Array.isArray(group?.fields) ? group.fields : [];
+    const dirtyFields = groupFields.filter((fieldKey) => isSettingDirty(fieldKey));
+    const hasDirtyFields = dirtyFields.length > 0;
+
+    if (elements.saveSettingsButton) {
+        elements.saveSettingsButton.disabled = !hasDirtyFields;
+        elements.saveSettingsButton.textContent = hasDirtyFields
+            ? `保存配置 (${dirtyFields.length})`
+            : "保存配置";
+    }
+    if (elements.resetSettingsButton) {
+        elements.resetSettingsButton.disabled = !hasDirtyFields;
+    }
+}
+
 function renderInlineMarkdown(text) {
     return escapeHtml(text)
         .replace(/`([^`]+)`/g, "<code>$1</code>")
@@ -1643,10 +2277,23 @@ async function loadMemories() {
 }
 
 async function loadActivityStats() {
+    if (elements.activityMethodology) renderLoading(elements.activityMethodology, "正在整理统计说明...");
     if (elements.activityOverview) renderLoading(elements.activityOverview, "正在加载活动摘要...");
+    if (elements.activityPulse) renderLoading(elements.activityPulse, "正在分析当前工作脉搏...");
+    if (elements.activitySessionSummary) renderLoading(elements.activitySessionSummary, "正在整理工作轨迹...");
+    if (elements.activitySessions) renderLoading(elements.activitySessions, "正在聚合连续工作段...");
     renderLoading(elements.todayActivityStats, "正在加载活动统计...");
     renderLoading(elements.totalActivityStats, "正在加载活动统计...");
+    if (elements.activityReview) renderLoading(elements.activityReview, "正在生成工作回顾...");
+    if (elements.activityInsights) renderLoading(elements.activityInsights, "正在整理回顾摘要...");
+    if (elements.activityTopWindows) renderLoading(elements.activityTopWindows, "正在汇总主力窗口...");
     if (elements.activityCharts) renderLoading(elements.activityCharts, "正在生成活动图表...");
+    if (elements.activityTrend) renderLoading(elements.activityTrend, "正在生成最近趋势...");
+    if (elements.activityInputStats) renderLoading(elements.activityInputStats, "正在汇总本地输入统计...");
+    if (elements.activityInputDays) renderLoading(elements.activityInputDays, "正在生成输入趋势...");
+    if (elements.activitySurfaceSummary) renderLoading(elements.activitySurfaceSummary, "正在整理应用与网站轨迹...");
+    if (elements.activityAppTrail) renderLoading(elements.activityAppTrail, "正在汇总主力应用...");
+    if (elements.activitySiteTrail) renderLoading(elements.activitySiteTrail, "正在汇总主力网站...");
     renderLoading(elements.recentActivities, "正在加载活动统计...");
     try {
         const data = await apiFetch("/api/activity");
@@ -1657,10 +2304,49 @@ async function loadActivityStats() {
         if (elements.activityOverview) {
             elements.activityOverview.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动摘要</p></div>";
         }
+        if (elements.activityMethodology) {
+            elements.activityMethodology.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法生成统计说明</p></div>";
+        }
+        if (elements.activityPulse) {
+            elements.activityPulse.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法生成当前工作脉搏</p></div>";
+        }
+        if (elements.activitySessionSummary) {
+            elements.activitySessionSummary.innerHTML = "";
+        }
+        if (elements.activitySessions) {
+            elements.activitySessions.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法整理今日工作轨迹</p></div>";
+        }
         elements.todayActivityStats.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动统计数据</p></div>";
         elements.totalActivityStats.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动统计数据</p></div>";
+        if (elements.activityReview) {
+            elements.activityReview.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法生成工作回顾</p></div>";
+        }
+        if (elements.activityInsights) {
+            elements.activityInsights.innerHTML = "";
+        }
+        if (elements.activityTopWindows) {
+            elements.activityTopWindows.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法汇总主力窗口</p></div>";
+        }
         if (elements.activityCharts) {
             elements.activityCharts.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法生成活动图表</p></div>";
+        }
+        if (elements.activityTrend) {
+            elements.activityTrend.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法生成最近趋势</p></div>";
+        }
+        if (elements.activityInputStats) {
+            elements.activityInputStats.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法加载本地输入统计</p></div>";
+        }
+        if (elements.activityInputDays) {
+            elements.activityInputDays.innerHTML = "";
+        }
+        if (elements.activitySurfaceSummary) {
+            elements.activitySurfaceSummary.innerHTML = "";
+        }
+        if (elements.activityAppTrail) {
+            elements.activityAppTrail.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法整理应用轨迹</p></div>";
+        }
+        if (elements.activitySiteTrail) {
+            elements.activitySiteTrail.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法整理网站轨迹</p></div>";
         }
         elements.recentActivities.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动统计数据</p></div>";
     }
@@ -1668,41 +2354,107 @@ async function loadActivityStats() {
 
 function renderActivityStats() {
     if (!state.activityStats) return;
+    if (elements.activitySearchInput) elements.activitySearchInput.value = state.activityFilters.search || "";
+    if (elements.activityBucketFilter) elements.activityBucketFilter.value = state.activityFilters.bucket || "all";
+    if (elements.activitySourceFilter) elements.activitySourceFilter.value = state.activityFilters.source || "all";
 
     const today = state.activityStats.today || {};
     const total = state.activityStats.total || {};
-    const recentActivities = state.activityStats.recent_activities || [];
+    const review = state.activityStats.review || {};
+    const pulse = state.activityStats.pulse || {};
+    const sessions = state.activityStats.sessions || {};
+    const inputStats = state.activityStats.input_stats || {};
+    const surfaceTrail = state.activityStats.surface_trail || {};
+    const activityView = getFilteredActivityView(state.activityStats);
+    const recentActivities = activityView.filteredRecentActivities;
+    const filteredSessions = {
+        ...sessions,
+        filtered_items: activityView.filteredSessionItems,
+    };
+    const activeFilters = state.activityFilters || {};
+    const appliedFilterLabels = [
+        activeFilters.search ? `关键词“${activeFilters.search}”` : "",
+        activeFilters.bucket && activeFilters.bucket !== "all"
+            ? `类型 ${elements.activityBucketFilter?.selectedOptions?.[0]?.textContent || activeFilters.bucket}`
+            : "",
+        activeFilters.source && activeFilters.source !== "all"
+            ? `来源 ${getActivitySourceLabel(activeFilters.source)}`
+            : "",
+    ].filter(Boolean);
+    const hasActiveFilters = appliedFilterLabels.length > 0;
+    if (elements.clearActivityFiltersButton) {
+        elements.clearActivityFiltersButton.disabled = !hasActiveFilters;
+    }
 
     elements.activityOverview.innerHTML = [
-        renderOverviewPill("今日总计", today.total_time || "0分钟", "warm"),
-        renderOverviewPill("今日工作占比", formatPercent(today.work_seconds, today.total_seconds), "good"),
-        renderOverviewPill("累计总计", total.total_time || "0分钟", ""),
-        renderOverviewPill("累计工作占比", formatPercent(total.work_seconds, total.total_seconds), ""),
+        renderOverviewPill("今日总计", getActivityDisplayTotalTime(today), "warm"),
+        renderOverviewPill("今日工作占比", today.has_input_estimate ? (today.effective_work_ratio || formatPercent(today.work_seconds, today.total_seconds)) : formatPercent(today.work_seconds, today.total_seconds), "good"),
+        renderOverviewPill("有效工作", getActivityDisplayWorkTime(today), "good"),
+        renderOverviewPill("今日专注段数", today.focus_session_label || "0 段", "good"),
+        renderOverviewPill("今日切换", today.switch_count_label || "0 次", ""),
+        renderOverviewPill("当前状态", pulse.label || inputStats.presence_label || "等待样本", pulse.tone || ""),
+        renderOverviewPill("隐私模式", sessions.privacy_masked ? "窗口脱敏" : "原始标题", sessions.privacy_masked ? "muted" : ""),
+        renderOverviewPill("累计总计", getActivityDisplayTotalTime(total), ""),
+        renderOverviewPill("累计工作占比", total.has_input_estimate ? (total.effective_work_ratio || formatPercent(total.work_seconds, total.total_seconds)) : formatPercent(total.work_seconds, total.total_seconds), ""),
     ].join("");
+    if (elements.activityFilterSummary) {
+        elements.activityFilterSummary.textContent = appliedFilterLabels.length
+            ? `已应用 ${appliedFilterLabels.join(" / ")}，当前显示 ${recentActivities.length} 条最近活动、${activityView.filteredSessionItems.length} 段工作轨迹。`
+            : "按关键词、类型和来源快速聚焦回顾内容。筛选只影响浏览视角，不会改动原始统计。";
+    }
+    renderActivityPulse(pulse);
+    renderActivitySessions(filteredSessions);
     elements.todayActivityStats.innerHTML = renderActivityMetricGrid(today);
     elements.totalActivityStats.innerHTML = renderActivityMetricGrid(total);
+    renderActivityReviewSection(review);
+    renderActivityTopWindows(review);
     renderActivityCharts(today, total);
+    renderActivityTrend(review);
+    renderInputStatsSection(inputStats);
+    renderActivitySurfaceTrail(surfaceTrail);
+    renderActivityMethodology(review, activityView);
 
     if (recentActivities.length === 0) {
-        elements.recentActivities.innerHTML = "<div class='empty-state'><strong>暂无活动记录</strong><p>开始使用插件后，这里会显示您的活动记录</p></div>";
+        elements.recentActivities.innerHTML = appliedFilterLabels.length
+            ? "<div class='empty-state'><strong>当前筛选下没有活动</strong><p>可以放宽关键词、类型或来源，查看完整轨迹。</p></div>"
+            : "<div class='empty-state'><strong>暂无活动记录</strong><p>开始使用插件后，这里会显示您的活动记录</p></div>";
         return;
     }
 
-    elements.recentActivities.innerHTML = recentActivities.map(activity => `
-        <article class="activity-record-card">
-            <div class="activity-record-head">
-                <div>
-                    <h3 class="list-item-title">${escapeHtml(activity.type)} - ${escapeHtml(activity.scene)}</h3>
-                    <div class="observation-tags">
-                        <span class="tag">${escapeHtml(activity.window)}</span>
-                        <span class="tag">${escapeHtml(activity.duration)}</span>
+    elements.recentActivities.innerHTML = recentActivities.map((activity) => {
+        const title = [activity.type, activity.scene].filter(Boolean).join(" · ") || "未标注活动";
+        const timeRange = [activity.start_time, activity.end_time].filter(Boolean).join(" - ") || "时间未知";
+        const windowName = activity.window || "未命名窗口";
+        const pageTitle = activity.page_title ? truncateLabel(activity.page_title, 22) : "";
+        const tags = [
+            activity.app_name || "",
+            activity.site_label || "",
+            pageTitle ? `页面 ${pageTitle}` : "",
+            activity.capture_source_label || "",
+            activity.duration || "",
+            activity.has_input_estimate ? `有效 ${activity.effective_duration || activity.duration || "0分钟"}` : "",
+        ].filter(Boolean);
+        const surfaceDetail = activity.page_title
+            ? `${activity.site_label || activity.app_name || "当前应用"} 的 ${activity.page_title}`
+            : (activity.site_label || activity.app_name || windowName);
+        const detail = activity.has_input_estimate
+            ? `${activity.duration || "0分钟"} 内主要停留在 ${surfaceDetail}，其中有效工作约 ${activity.effective_duration || "0分钟"}`
+            : `${activity.duration || "0分钟"} 内主要停留在 ${surfaceDetail}`;
+        return `
+            <article class="activity-record-card">
+                <div class="activity-record-head">
+                    <div>
+                        <h3 class="list-item-title">${escapeHtml(title)}</h3>
+                        <div class="observation-tags">
+                            ${tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}
+                        </div>
                     </div>
+                    <span class="activity-record-range">${escapeHtml(timeRange)}</span>
                 </div>
-                <span class="activity-record-range">${escapeHtml(activity.start_time)} - ${escapeHtml(activity.end_time)}</span>
-            </div>
-            <p class="memory-meta">${escapeHtml(activity.duration)} 内主要停留在 ${escapeHtml(activity.window)}</p>
-        </article>
-    `).join("");
+                <p class="memory-meta">${escapeHtml(detail)}</p>
+            </article>
+        `;
+    }).join("");
 }
 
 async function refreshActiveSection() {
@@ -1720,14 +2472,17 @@ async function refreshActiveSection() {
 
 function collectVisibleSettingsUpdates() {
     const updates = {};
-    const inputs = elements.settingsForm.querySelectorAll("[data-setting-key]");
-    inputs.forEach((input) => {
-        const key = input.dataset.settingKey;
+    const activeGroup = getActiveSettingsGroup();
+    const fieldKeys = Array.isArray(activeGroup?.fields) ? activeGroup.fields : [];
+    fieldKeys.forEach((key) => {
         const meta = getSettingMeta(key);
-        if (meta.sensitive && !String(input.value || "").trim()) {
+        const nextValue = state.settingsValues[key];
+        if (meta.sensitive && !String(nextValue || "").trim()) {
             return;
         }
-        updates[key] = readSettingInputValue(input, meta);
+        if (!areSettingValuesEqual(nextValue, state.settingsSnapshot[key])) {
+            updates[key] = nextValue;
+        }
     });
     return updates;
 }
@@ -1802,6 +2557,38 @@ elements.sortFilter.addEventListener("change", async () => {
     state.observationPage = 1;
     await loadObservations();
 });
+
+if (elements.activitySearchInput) {
+    elements.activitySearchInput.addEventListener("input", () => {
+        state.activityFilters.search = elements.activitySearchInput.value || "";
+        renderActivityStats();
+    });
+}
+
+if (elements.activityBucketFilter) {
+    elements.activityBucketFilter.addEventListener("change", () => {
+        state.activityFilters.bucket = elements.activityBucketFilter.value || "all";
+        renderActivityStats();
+    });
+}
+
+if (elements.activitySourceFilter) {
+    elements.activitySourceFilter.addEventListener("change", () => {
+        state.activityFilters.source = elements.activitySourceFilter.value || "all";
+        renderActivityStats();
+    });
+}
+
+if (elements.clearActivityFiltersButton) {
+    elements.clearActivityFiltersButton.addEventListener("click", () => {
+        state.activityFilters = {
+            search: "",
+            bucket: "all",
+            source: "all",
+        };
+        renderActivityStats();
+    });
+}
 
 elements.selectAllObservations.addEventListener("change", () => {
     if (elements.selectAllObservations.checked) {
@@ -1888,12 +2675,16 @@ async function handleSettingsActionClick(event) {
         openSettingsGroup("persona");
         return;
     }
+    if (action === "open-analytics-group") {
+        openSettingsGroup("analytics");
+        return;
+    }
     if (action === "toggle-screen-assist") {
         openSettingsGroup("persona");
         setSettingsValues({
             enable_natural_language_screen_assist: !Boolean(state.settingsValues.enable_natural_language_screen_assist),
         });
-        elements.settingsFeedback.textContent = "已切换自然语言求助开关，记得保存配置。";
+        setFeedbackMessage(elements.settingsFeedback, "已切换自然语言求助开关，记得保存配置。", "warn");
         return;
     }
     if (action === "vision-live") {
@@ -1902,7 +2693,7 @@ async function handleSettingsActionClick(event) {
             use_shared_screenshot_dir: false,
             shared_screenshot_dir: "",
         });
-        elements.settingsFeedback.textContent = "已切回实时截图推荐值，记得保存配置。";
+        setFeedbackMessage(elements.settingsFeedback, "已切回实时截图推荐值，记得保存配置。", "warn");
         return;
     }
     if (action === "vision-docker") {
@@ -1910,7 +2701,7 @@ async function handleSettingsActionClick(event) {
         setSettingsValues({
             use_shared_screenshot_dir: true,
         });
-        elements.settingsFeedback.textContent = "已切到共享截图目录模式，记得保存配置。";
+        setFeedbackMessage(elements.settingsFeedback, "已切到共享截图目录模式，记得保存配置。", "warn");
         return;
     }
     if (action === "toggle-window-companion") {
@@ -1918,19 +2709,23 @@ async function handleSettingsActionClick(event) {
         setSettingsValues({
             enable_window_companion: !Boolean(state.settingsValues.enable_window_companion),
         });
-        elements.settingsFeedback.textContent = "已切换窗口自动陪伴开关，记得保存配置。";
+        setFeedbackMessage(elements.settingsFeedback, "已切换窗口自动陪伴开关，记得保存配置。", "warn");
         return;
     }
     if (action === "load-window-candidates") {
         openSettingsGroup("runtime");
-        elements.settingsFeedback.textContent = "正在读取当前窗口列表...";
+        setFeedbackMessage(elements.settingsFeedback, "正在读取当前窗口列表...", "warn");
         try {
             await loadWindowCandidates();
-            elements.settingsFeedback.textContent = state.windowCandidates.length
-                ? "已载入当前窗口列表，点按钮即可加入陪伴目标。"
-                : "没有读取到可用窗口，请确认桌面环境和权限正常。";
+            setFeedbackMessage(
+                elements.settingsFeedback,
+                state.windowCandidates.length
+                    ? "已载入当前窗口列表，点按钮即可加入陪伴目标。"
+                    : "没有读取到可用窗口，请确认桌面环境和权限正常。",
+                state.windowCandidates.length ? "success" : "warn"
+            );
         } catch (error) {
-            elements.settingsFeedback.textContent = `读取窗口失败: ${error.message}`;
+            setFeedbackMessage(elements.settingsFeedback, `读取窗口失败: ${error.message}`, "error");
         }
         return;
     }
@@ -1939,9 +2734,13 @@ async function handleSettingsActionClick(event) {
         const index = Number(action.split("::")[1]);
         const title = state.windowCandidates[index];
         appendWindowCompanionTarget(title);
-        elements.settingsFeedback.textContent = title
-            ? `已把“${title}”加入窗口陪伴目标。`
-            : "这个窗口候选已经失效，请重新读取窗口列表。";
+        setFeedbackMessage(
+            elements.settingsFeedback,
+            title
+                ? `已把“${title}”加入窗口陪伴目标。`
+                : "这个窗口候选已经失效，请重新读取窗口列表。",
+            title ? "success" : "warn"
+        );
     }
 }
 
@@ -1949,7 +2748,12 @@ elements.settingsHelper.addEventListener("click", handleSettingsActionClick);
 elements.runtimeInsights.addEventListener("click", handleSettingsActionClick);
 elements.runtimeForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    elements.runtimeFeedback.textContent = "";
+    const submitButton = elements.runtimeForm.querySelector('button[type="submit"]');
+    setFeedbackMessage(elements.runtimeFeedback, "");
+    if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = "保存中...";
+    }
     try {
         const data = await apiFetch("/api/runtime/config", {
             method: "POST",
@@ -1957,28 +2761,60 @@ elements.runtimeForm.addEventListener("submit", async (event) => {
         });
         state.runtime = data.runtime || null;
         renderRuntime();
-        elements.runtimeFeedback.textContent = "运行设置已保存。";
+        await loadHealth();
+        setFeedbackMessage(elements.runtimeFeedback, "运行设置已保存。", "success");
     } catch (error) {
-        elements.runtimeFeedback.textContent = `保存失败: ${error.message}`;
+        const recovered = isNetworkError(error) ? await waitForWebUiRecovery() : false;
+        if (recovered) {
+            await loadRuntime();
+            await loadHealth();
+            setFeedbackMessage(elements.runtimeFeedback, "运行设置请求后 WebUI 已重新连上，请检查刚才的改动是否已经生效。", "warn");
+        } else {
+            setFeedbackMessage(elements.runtimeFeedback, buildRuntimeSaveFailureMessage(error), "error");
+        }
+    } finally {
+        if (submitButton) {
+            submitButton.disabled = false;
+            submitButton.textContent = "保存设置";
+        }
     }
 });
 
+if (elements.settingsSearchInput) {
     elements.settingsSearchInput.addEventListener("input", () => {
-    state.settingsSearch = elements.settingsSearchInput.value || "";
-    renderSettingsGroups();
-    renderSettingsForm();
-});
+        state.settingsSearch = elements.settingsSearchInput.value || "";
+        renderSettingsGroups();
+        renderSettingsForm();
+    });
+}
 
 elements.resetSettingsButton.addEventListener("click", () => {
-    state.settingsValues = { ...state.settingsSnapshot };
+    const visibleGroups = getVisibleSettingsGroups();
+    const activeGroup = visibleGroups.find((group) => group.id === state.activeSettingsGroup);
+    const nextValues = { ...state.settingsValues };
+    (activeGroup?.fields || []).forEach((fieldKey) => {
+        nextValues[fieldKey] = state.settingsSnapshot[fieldKey];
+    });
+    state.settingsValues = nextValues;
+    renderSettingsGroups();
     renderSettingsForm();
-    elements.settingsFeedback.textContent = "当前分组已恢复为最近一次加载到的值。";
+    setFeedbackMessage(elements.settingsFeedback, "当前分组已恢复为最近一次加载到的值。", "success");
 });
 
 elements.saveSettingsButton.addEventListener("click", async () => {
-    elements.settingsFeedback.textContent = "";
+    const updates = collectVisibleSettingsUpdates();
+    const changedKeys = Object.keys(updates);
+    if (!changedKeys.length) {
+        setFeedbackMessage(elements.settingsFeedback, "当前分组没有新的改动可保存。", "warn");
+        return;
+    }
+
+    const saveButton = elements.saveSettingsButton;
+    const originalLabel = saveButton.textContent;
+    saveButton.disabled = true;
+    saveButton.textContent = "保存中...";
+    setFeedbackMessage(elements.settingsFeedback, "");
     try {
-        const updates = collectVisibleSettingsUpdates();
         const data = await apiFetch("/api/settings", {
             method: "POST",
             body: JSON.stringify({ updates }),
@@ -1991,21 +2827,51 @@ elements.saveSettingsButton.addEventListener("click", async () => {
         renderSettingsGroups();
         renderSettingsForm();
         await loadRuntime();
-        elements.settingsFeedback.textContent = "配置已保存，相关运行态已同步刷新。";
+        await loadHealth();
+        setFeedbackMessage(
+            elements.settingsFeedback,
+            `已保存 ${Number(data.meta?.applied_count || changedKeys.length)} 项配置，相关运行态已同步刷新。`,
+            "success"
+        );
     } catch (error) {
-        elements.settingsFeedback.textContent = `保存失败: ${error.message}`;
+        const touchesWebui = changedKeys.some((key) => key.startsWith("webui."));
+        const recovered = isNetworkError(error) ? await waitForWebUiRecovery() : false;
+        if (recovered) {
+            await loadSettings();
+            await loadRuntime();
+            await loadHealth();
+            setFeedbackMessage(
+                elements.settingsFeedback,
+                touchesWebui
+                    ? "配置已提交，WebUI 已重新连上。如果你修改了 host 或 port，请改用新的访问地址。"
+                    : "保存请求后 WebUI 已重新连上，请确认刚才的改动是否已经生效。",
+                "warn"
+            );
+        } else {
+            setFeedbackMessage(
+                elements.settingsFeedback,
+                buildSettingsSaveFailureMessage(error, {
+                    changedCount: changedKeys.length,
+                    touchesWebui,
+                }),
+                "error"
+            );
+        }
+    } finally {
+        saveButton.disabled = false;
+        saveButton.textContent = originalLabel;
     }
 });
 
 elements.stopTasksButton.addEventListener("click", async () => {
-    elements.runtimeFeedback.textContent = "";
+    setFeedbackMessage(elements.runtimeFeedback, "");
     try {
         const data = await apiFetch("/api/runtime/stop", { method: "POST" });
         state.runtime = data.runtime || null;
         renderRuntime();
-        elements.runtimeFeedback.textContent = "当前自动任务已停止。";
+        setFeedbackMessage(elements.runtimeFeedback, "当前自动任务已停止。", "success");
     } catch (error) {
-        elements.runtimeFeedback.textContent = `停止失败: ${error.message}`;
+        setFeedbackMessage(elements.runtimeFeedback, `停止失败: ${error.message}`, "error");
     }
 });
 
@@ -2022,7 +2888,7 @@ elements.logoutButton.addEventListener("click", async () => {
 
 window.addEventListener("DOMContentLoaded", async () => {
     const hash = window.location.hash.replace("#", "");
-    if (["runtime", "settings", "diaries", "observations", "memories"].includes(hash)) {
+    if (["runtime", "settings", "diaries", "observations", "memories", "activity"].includes(hash)) {
         switchSection(hash);
     }
 

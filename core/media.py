@@ -1474,20 +1474,13 @@ class ScreenCompanionMediaMixin:
         while self.running and self._is_current_process_instance():
             try:
                 now = datetime.datetime.now()
-                today = now.date()
-                target_date = self._resolve_diary_target_date(now)
-
-                if self.enable_diary and self.last_diary_date != target_date:
-                    # 解析日记时间
-                    try:
-                        hour, minute = map(
-                            int,
-                            self._normalize_clock_text(self.diary_time, "00:00").split(":"),
+                if self.enable_diary:
+                    current_target_date = self._resolve_diary_target_date(now)
+                    for target_date in self._get_due_diary_dates(now):
+                        await self._generate_diary(
+                            target_date=target_date,
+                            allow_empty=(target_date == current_target_date),
                         )
-                        if now.hour == hour and now.minute == minute:
-                            await self._generate_diary(target_date=target_date)
-                    except Exception as e:
-                        logger.error(f"解析日记时间失败: {e}")
 
                 # 等待 1 分钟，期间持续检查 running 标志
                 for _ in range(60):
@@ -1546,6 +1539,15 @@ class ScreenCompanionMediaMixin:
                 else:
                     logger.info(f"[任务 {task_id}] 使用当前预设间隔: {check_interval} 秒")
 
+                while self.is_running and self.state == "active":
+                    if not await self._handle_away_auto_pause(event, task_id=task_id):
+                        break
+                    await asyncio.sleep(1)
+
+                if not self.is_running or self.state != "active":
+                    logger.info(f"[任务 {task_id}] 任务状态已变化，结束本轮")
+                    break
+
                 logger.info(f"[任务 {task_id}] 等待 {check_interval} 秒后进入触发判定")
                 elapsed = 0
                 window_changed = False
@@ -1555,6 +1557,10 @@ class ScreenCompanionMediaMixin:
                         logger.info(f"[任务 {task_id}] 任务状态已变化，停止等待")
                         break
                     try:
+                        if await self._handle_away_auto_pause(event, task_id=task_id):
+                            await asyncio.sleep(1)
+                            continue
+
                         # 检测窗口变化
                         if elapsed % 3 == 0:  # 每3秒检测一次窗口变化
                             latest_window_changed, new_windows = self._detect_window_changes()
@@ -1592,6 +1598,10 @@ class ScreenCompanionMediaMixin:
                 if not self.is_running or self.state != "active":
                     logger.info(f"[任务 {task_id}] 任务状态已变化，结束本轮")
                     break
+
+                if await self._handle_away_auto_pause(event, task_id=task_id):
+                    await asyncio.sleep(1)
+                    continue
 
                 # 再次确认是否仍处于活跃时间段
                 if not self._is_in_active_time_range():
@@ -1674,6 +1684,10 @@ class ScreenCompanionMediaMixin:
                         )
                         if should_defer:
                             logger.info(f"[任务 {task_id}] 主动识屏暂缓: {defer_reason}")
+                            continue
+
+                        if await self._handle_away_auto_pause(event, task_id=task_id):
+                            await asyncio.sleep(1)
                             continue
 
                         if not self.is_running or self.state != "active":
@@ -1892,6 +1906,9 @@ class ScreenCompanionMediaMixin:
                 logger.info(f"[任务 {task_id}] 已从自动任务列表移除")
             # 检查是否还有其他任务在运行
             if not self.auto_tasks:
+                reset_away_pause = getattr(self, "_reset_away_pause_runtime_state", None)
+                if callable(reset_away_pause):
+                    reset_away_pause()
                 self.is_running = False
                 logger.info("所有自动观察任务已结束")
             logger.info(f"任务 {task_id} 已结束")
@@ -1943,17 +1960,11 @@ class ScreenCompanionMediaMixin:
                 self.is_running = False
                 self.state = "inactive"
                 self.enable_mic_monitor = False
+                self.enable_input_stats = False
                 self.window_companion_active_title = ""
-                now_ts = time.time()
-                if self.current_activity and self.activity_start_time:
-                    self._append_activity_record(
-                        activity=self.current_activity,
-                        start_time=self.activity_start_time,
-                        end_time=now_ts,
-                        min_duration_seconds=self.LIVE_ACTIVITY_MIN_DURATION_SECONDS,
-                    )
-                    self.current_activity = None
-                    self.activity_start_time = None
+                self._close_current_activity(
+                    min_duration_seconds=self.LIVE_ACTIVITY_MIN_DURATION_SECONDS
+                )
                 
                 # 停止 Web 服务器
                 if self.web_server:
@@ -1963,6 +1974,7 @@ class ScreenCompanionMediaMixin:
                     # 增加延迟时间，确保端口完全释放
                     await asyncio.sleep(1.0)
                 await self._stop_recording_if_running()
+                self._stop_input_stats_listener(reason="shutdown")
                 self.window_companion_active_target = ""
                 self.window_companion_active_rule = {}
 
@@ -4399,7 +4411,11 @@ class ScreenCompanionMediaMixin:
                     response_preview=response_text,
                 )
 
-            self._update_activity(scene, active_window_title)
+                self._update_activity(
+                    scene,
+                    active_window_title,
+                    source="screen_analysis",
+                )
             response_text = self._polish_response_text(
                 response_text,
                 scene,

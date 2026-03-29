@@ -201,6 +201,8 @@
                         </div>
                     </div>
                     <div class="health-grid" id="healthGrid"></div>
+                    <div class="health-check-list" id="healthChecks"></div>
+                    <div class="helper-grid health-warning-grid" id="healthWarnings"></div>
                 </article>
             </section>
             <section id="settings" class="section">
@@ -352,7 +354,67 @@
                         <h2>活动统计</h2>
                     </div>
                 </div>
+                <div class="activity-control-grid">
+                    <article class="panel">
+                        <div class="panel-header">
+                            <div>
+                                <h3>轨迹筛选</h3>
+                                <span class="panel-subtle" id="activityFilterSummary">按关键词、类型和来源快速聚焦回顾内容。</span>
+                            </div>
+                        </div>
+                        <div class="toolbar activity-toolbar">
+                            <label class="field compact-field">
+                                <span>搜索轨迹</span>
+                                <input id="activitySearchInput" type="search" placeholder="窗口、应用、站点、页面">
+                            </label>
+                            <label class="field compact-field">
+                                <span>活动类型</span>
+                                <select id="activityBucketFilter">
+                                    <option value="all">全部</option>
+                                    <option value="work">工作</option>
+                                    <option value="play">摸鱼</option>
+                                    <option value="other">其他</option>
+                                </select>
+                            </label>
+                            <label class="field compact-field">
+                                <span>轨迹来源</span>
+                                <select id="activitySourceFilter">
+                                    <option value="all">全部</option>
+                                    <option value="screen_analysis">识屏轨迹</option>
+                                    <option value="background_tracker">独立轨迹</option>
+                                </select>
+                            </label>
+                            <button class="ghost-button" id="clearActivityFiltersButton" type="button">清空筛选</button>
+                        </div>
+                    </article>
+                    <article class="panel">
+                        <div class="panel-header">
+                            <div>
+                                <h3>统计说明</h3>
+                                <span class="panel-subtle">帮助理解“有效工作”“工作段”和轨迹来源是怎么来的。</span>
+                            </div>
+                        </div>
+                        <div class="helper-grid activity-methodology" id="activityMethodology"></div>
+                    </article>
+                </div>
                 <div class="activity-overview" id="activityOverview"></div>
+                <div class="activity-workspace-grid">
+                    <article class="panel">
+                        <div class="panel-header">
+                            <h3>工作脉搏</h3>
+                            <span class="panel-subtle">把活动、输入和隐私状态压缩成一个更像在场感的当前视角</span>
+                        </div>
+                        <div class="activity-pulse" id="activityPulse"></div>
+                    </article>
+                    <article class="panel">
+                        <div class="panel-header">
+                            <h3>今日工作轨迹</h3>
+                            <span class="panel-subtle">把零散活动合并成更像 Work_Review 的连续工作段</span>
+                        </div>
+                        <div class="activity-session-summary" id="activitySessionSummary"></div>
+                        <div class="list-stack activity-session-list" id="activitySessions"></div>
+                    </article>
+                </div>
                 <div class="activity-grid">
                     <article class="panel">
                         <div class="panel-header">
@@ -369,12 +431,61 @@
                         <div class="activity-stats" id="totalActivityStats"></div>
                     </article>
                 </div>
+                <div class="activity-review-grid">
+                    <article class="panel">
+                        <div class="panel-header">
+                            <h3>工作回顾</h3>
+                            <span class="panel-subtle">更像 keystats / workreview 的专注回顾视角</span>
+                        </div>
+                        <div class="activity-review-cards" id="activityReview"></div>
+                        <div class="helper-grid activity-review-insights" id="activityInsights"></div>
+                    </article>
+                    <article class="panel">
+                        <div class="panel-header">
+                            <h3>主力窗口</h3>
+                            <span class="panel-subtle">看清今天主要把时间花在了哪里</span>
+                        </div>
+                        <div class="list-stack activity-top-windows" id="activityTopWindows"></div>
+                    </article>
+                </div>
                 <article class="panel activity-chart-panel">
                     <div class="panel-header">
                         <h3>时间配比图</h3>
                         <span class="panel-subtle">工作、摸鱼、其他的占比一眼看清</span>
                     </div>
                     <div class="activity-chart-stack" id="activityCharts"></div>
+                </article>
+                <article class="panel activity-trend-panel">
+                    <div class="panel-header">
+                        <h3>近 7 天节奏</h3>
+                        <span class="panel-subtle">按天看工作、摸鱼与切换密度的变化</span>
+                    </div>
+                    <div class="activity-trend" id="activityTrend"></div>
+                </article>
+                <article class="panel activity-input-panel">
+                    <div class="panel-header">
+                        <h3>本地输入统计</h3>
+                        <span class="panel-subtle">可选记录键盘和鼠标输入，补充更像 KeyStats 的轻量数据</span>
+                    </div>
+                    <div class="activity-input-grid" id="activityInputStats"></div>
+                    <div class="activity-input-days" id="activityInputDays"></div>
+                </article>
+                <article class="panel activity-surface-panel">
+                    <div class="panel-header">
+                        <h3>应用 / 网站轨迹</h3>
+                        <span class="panel-subtle">把窗口活动收束成更像 Work_Review 的应用层和网页层轨迹</span>
+                    </div>
+                    <div class="activity-surface-summary" id="activitySurfaceSummary"></div>
+                    <div class="activity-surface-columns">
+                        <div>
+                            <p class="panel-label">主要应用</p>
+                            <div class="list-stack activity-surface-list" id="activityAppTrail"></div>
+                        </div>
+                        <div>
+                            <p class="panel-label">主要网站</p>
+                            <div class="list-stack activity-surface-list" id="activitySiteTrail"></div>
+                        </div>
+                    </div>
                 </article>
                 <article class="panel">
                     <div class="panel-header">

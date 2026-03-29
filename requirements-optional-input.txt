@@ -1,0 +1,2 @@
+# 兼容旧安装流程保留；从 2.9.0 起，pynput 已并入 requirements.txt
+pynput

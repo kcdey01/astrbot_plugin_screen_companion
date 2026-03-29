@@ -21,9 +21,10 @@ from .core.proactive import ScreenCompanionProactiveMixin
 from .core.runtime import ScreenCompanionRuntimeMixin
 from .core.memory import ScreenCompanionMemoryMixin
 from .core.media import ScreenCompanionMediaMixin
+from .core.input_stats import ScreenCompanionInputStatsMixin
 from .core.command_support import ScreenCompanionCommandSupportMixin
 
-class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin, ScreenCompanionMemoryMixin, ScreenCompanionMediaMixin, ScreenCompanionCommandSupportMixin, Star):
+class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin, ScreenCompanionMemoryMixin, ScreenCompanionInputStatsMixin, ScreenCompanionMediaMixin, ScreenCompanionCommandSupportMixin, Star):
     LEGACY_DEFAULT_CUSTOM_TASK = "02:00 根据用户行为催促其尽快休息"
     DEFAULT_WEBUI_PORT = 6314
     SCREENSHOT_MODE = "screenshot"
@@ -97,10 +98,11 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         # 日记功能相关
         self.diary_entries = []
         self.last_diary_date = None
+        self.diary_metadata = {}
 
         if not self.diary_storage:
             self.diary_storage = str(self.plugin_config.diary_dir)
-        os.makedirs(self.diary_storage, exist_ok=True)
+        self._refresh_diary_storage_runtime()
 
         self.parsed_custom_tasks = []
         self._parse_custom_tasks()
@@ -129,6 +131,9 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         if not self.learning_storage:
             self.learning_storage = str(self.plugin_config.learning_dir)
         os.makedirs(self.learning_storage, exist_ok=True)
+        self.input_stats_file = os.path.join(self.learning_storage, "input_stats_daily.json")
+        self._ensure_input_stats_state()
+        self._load_input_stats_daily()
 
         # 观察记录相关
         self.observations = []  # 存储观察记录
@@ -143,11 +148,6 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         # WebUI 相关
         self.web_server = None
         self._ensure_webui_password()
-
-        # 日记元数据相关（记录日记查看状态）
-        self.diary_metadata = {}
-        self.diary_metadata_file = os.path.join(self.diary_storage, "diary_metadata.json")
-        self._load_diary_metadata()
 
         # 长期记忆系统
         self.long_term_memory = {}
@@ -173,6 +173,8 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
         # 时间跟踪相关
         self.current_activity = None  # 当前活动
+        self.current_activity_meta = None  # 当前活动的结构化信息
+        self.current_activity_source = ""  # 当前活动来源
         self.activity_start_time = None  # 活动开始时间
         self.activity_history = []  # 活动历史记录
         self.activity_history_file = os.path.join(self.learning_storage, "activity_history.json")
@@ -210,7 +212,12 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         task = asyncio.create_task(self._custom_tasks_task())
         self.background_tasks.append(task)
 
+        task = asyncio.create_task(self._input_stats_flush_task())
+        self.background_tasks.append(task)
+
         self._ensure_mic_monitor_background_task()
+        task = asyncio.create_task(self._background_activity_tracking_task())
+        self.background_tasks.append(task)
         task = asyncio.create_task(self._window_companion_task())
         self.background_tasks.append(task)
         self._shutdown_lock = asyncio.Lock()
@@ -218,6 +225,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self._is_stopping = False
         self._screen_assist_cooldowns = {}
         self.last_shared_activity_invite_time = 0.0
+        self._ensure_input_stats_listener()
         if self._use_screen_recording_mode():
             self._safe_create_task(
                 self._ensure_recording_ready(),
@@ -310,6 +318,44 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.enable_mic_monitor = self._coerce_bool(self.plugin_config.enable_mic_monitor)
         self.mic_threshold = self.plugin_config.mic_threshold
         self.mic_check_interval = self.plugin_config.mic_check_interval
+        self.enable_input_stats = self._coerce_bool(
+            getattr(self.plugin_config, "enable_input_stats", False)
+        )
+        self.enable_background_activity_tracking = self._coerce_bool(
+            getattr(self.plugin_config, "enable_background_activity_tracking", False)
+        )
+        self.background_activity_tracking_interval = max(
+            5,
+            int(
+                getattr(
+                    self.plugin_config,
+                    "background_activity_tracking_interval",
+                    15,
+                )
+                or 15
+            ),
+        )
+        self.input_stats_flush_interval = max(
+            10,
+            int(getattr(self.plugin_config, "input_stats_flush_interval", 60) or 60),
+        )
+        self.enable_away_auto_pause = self._coerce_bool(
+            getattr(self.plugin_config, "enable_away_auto_pause", False)
+        )
+        self.away_auto_pause_threshold = max(
+            300,
+            int(getattr(self.plugin_config, "away_auto_pause_threshold", 1200) or 1200),
+        )
+        self.away_long_notice_threshold = max(
+            self.away_auto_pause_threshold + 60,
+            int(getattr(self.plugin_config, "away_long_notice_threshold", 3600) or 3600),
+        )
+        self.mask_activity_window_titles = self._coerce_bool(
+            getattr(self.plugin_config, "mask_activity_window_titles", False)
+        )
+        self.activity_recognition_rules = str(
+            getattr(self.plugin_config, "activity_recognition_rules", "") or ""
+        )
         self.memory_threshold = self.plugin_config.memory_threshold
         self.battery_threshold = self.plugin_config.battery_threshold
         self.admin_qq = self.plugin_config.admin_qq
@@ -341,6 +387,9 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             getattr(self.plugin_config, "enable_shared_activity_preference_learning", True)
         )
         self.learning_storage = self.plugin_config.learning_storage
+        if not self.learning_storage:
+            self.learning_storage = str(self.plugin_config.learning_dir)
+        self.input_stats_file = os.path.join(self.learning_storage, "input_stats_daily.json")
         self.interaction_kpi = self.plugin_config.interaction_kpi
         self.debug = self._coerce_bool(self.plugin_config.debug)
         self.custom_presets = self.plugin_config.custom_presets
@@ -595,14 +644,22 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                     getattr(self, "screen_recognition_mode", self.SCREENSHOT_MODE)
                 )
                 old_mic_monitor_enabled = bool(getattr(self, "enable_mic_monitor", False))
+                old_input_stats_enabled = bool(getattr(self, "enable_input_stats", False))
                 self._apply_plugin_config_updates(config_dict)
 
                 self._sync_all_config()
+                self._refresh_diary_storage_runtime()
                 
                 if self.enable_mic_monitor:
                     self._ensure_mic_monitor_background_task()
                 elif old_mic_monitor_enabled:
                     self._stop_mic_monitor_background_task()
+
+                if self.enable_input_stats:
+                    if not old_input_stats_enabled:
+                        self._ensure_input_stats_listener()
+                elif old_input_stats_enabled:
+                    self._stop_input_stats_listener(reason="config_update")
 
                 # 检查是否明确设置了空密码
                 password_set_to_empty = False
