@@ -1260,6 +1260,8 @@ class ScreenCompanionMediaMixin:
 
                 if volume > self.mic_threshold:
                     logger.info(f"麦克风音量超过阈值: {volume} > {self.mic_threshold}")
+                    # 在进入异步识屏任务前就启动冷却，避免高音量持续时重复创建任务。
+                    self.last_mic_trigger = current_time
 
                     # 检查环境
                     ok, err_msg = self._check_env(check_mic=True)
@@ -1323,8 +1325,6 @@ class ScreenCompanionMediaMixin:
                                                 capture_context.get("_rest_reminder_info", {}) or {}
                                             )
 
-                                # 更新上次触发时间
-                                self.last_mic_trigger = current_time
                             finally:
                                 # 任务完成后清理临时任务
                                 if temp_task_id in self.temporary_tasks:

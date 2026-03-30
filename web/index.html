@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>屏幕伴侣控制台</title>
-    <link rel="stylesheet" href="/web/app.css">
+    <link rel="stylesheet" href="/web/app.css?v=2.9.1">
 </head>
 <body>
     <div class="app-shell">
@@ -257,15 +257,31 @@
                 <div class="content-grid diaries-grid">
                     <article class="panel">
                         <div class="panel-header">
-                            <h3>最近日记</h3>
-                            <span class="panel-subtle" id="diarySummary">优先展示今天，也可以切换历史日期。</span>
+                            <div>
+                                <h3>最近日记</h3>
+                                <span class="panel-subtle" id="diarySummary">优先展示今天，也可以切换历史日期。</span>
+                            </div>
                         </div>
+                        <div class="toolbar diary-toolbar">
+                            <label class="selection-toggle">
+                                <input id="selectAllDiaries" type="checkbox">
+                                <span>全选</span>
+                            </label>
+                            <div class="diary-toolbar-actions">
+                                <button class="ghost-button" id="clearDiarySelectionsButton" type="button">清空选择</button>
+                                <button class="danger-button" id="deleteSelectedDiariesButton" type="button">删除选中</button>
+                            </div>
+                        </div>
+                        <p class="panel-subtle diary-selection-meta" id="diarySelectionMeta">还没有选择要删除的日记。</p>
                         <div class="list-stack" id="diaryList"></div>
                     </article>
                     <article class="panel diary-panel">
                         <div class="panel-header">
-                            <h3 id="diaryTitle">今天的日记</h3>
-                            <span class="panel-subtle" id="diaryMeta">等待加载</span>
+                            <div>
+                                <h3 id="diaryTitle">今天的日记</h3>
+                                <span class="panel-subtle" id="diaryMeta">等待加载</span>
+                            </div>
+                            <button class="danger-button" id="deleteCurrentDiaryButton" type="button">删除这篇</button>
                         </div>
                         <div class="diary-reading-stage">
                             <section class="diary-section diary-paper-section">
@@ -409,7 +425,7 @@
                     <article class="panel">
                         <div class="panel-header">
                             <h3>今日工作轨迹</h3>
-                            <span class="panel-subtle">把零散活动合并成更像 Work_Review 的连续工作段</span>
+                            <span class="panel-subtle">把零散活动合并成连续的工作段</span>
                         </div>
                         <div class="activity-session-summary" id="activitySessionSummary"></div>
                         <div class="list-stack activity-session-list" id="activitySessions"></div>
@@ -435,7 +451,7 @@
                     <article class="panel">
                         <div class="panel-header">
                             <h3>工作回顾</h3>
-                            <span class="panel-subtle">更像 keystats / workreview 的专注回顾视角</span>
+                            <span class="panel-subtle">更聚焦专注节奏的回顾视角</span>
                         </div>
                         <div class="activity-review-cards" id="activityReview"></div>
                         <div class="helper-grid activity-review-insights" id="activityInsights"></div>
@@ -463,18 +479,18 @@
                     <div class="activity-trend" id="activityTrend"></div>
                 </article>
                 <article class="panel activity-input-panel">
-                    <div class="panel-header">
-                        <h3>本地输入统计</h3>
-                        <span class="panel-subtle">可选记录键盘和鼠标输入，补充更像 KeyStats 的轻量数据</span>
-                    </div>
+                        <div class="panel-header">
+                            <h3>本地输入统计</h3>
+                            <span class="panel-subtle">可选记录键盘和鼠标输入，补充轻量的键鼠数据</span>
+                        </div>
                     <div class="activity-input-grid" id="activityInputStats"></div>
                     <div class="activity-input-days" id="activityInputDays"></div>
                 </article>
                 <article class="panel activity-surface-panel">
-                    <div class="panel-header">
-                        <h3>应用 / 网站轨迹</h3>
-                        <span class="panel-subtle">把窗口活动收束成更像 Work_Review 的应用层和网页层轨迹</span>
-                    </div>
+                        <div class="panel-header">
+                            <h3>应用 / 网站轨迹</h3>
+                            <span class="panel-subtle">把窗口活动收束成更清晰的应用层和网页层轨迹</span>
+                        </div>
                     <div class="activity-surface-summary" id="activitySurfaceSummary"></div>
                     <div class="activity-surface-columns">
                         <div>
@@ -519,7 +535,7 @@
         </div>
     </template>
 
-    <script src="/web/app.js"></script>
+    <script src="/web/app.js?v=2.9.1"></script>
 </body>
 </html>
 

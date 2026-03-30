@@ -4,7 +4,7 @@ import os
 import re
 import uuid
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +16,7 @@ from astrbot.api import logger
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
 
-    APP_VERSION = "2.9.0"
+    APP_VERSION = "2.9.1"
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000
@@ -239,6 +239,8 @@ class WebServer:
         # API 路由
         self.app.router.add_get("/api/diaries", self.handle_list_diaries)
         self.app.router.add_get("/api/diary/{date}", self.handle_get_diary)
+        self.app.router.add_delete("/api/diary/{date}", self.handle_delete_diary)
+        self.app.router.add_delete("/api/diaries/batch", self.handle_batch_delete_diaries)
         self.app.router.add_get("/api/observations", self.handle_list_observations)
         self.app.router.add_delete("/api/observations/{index}", self.handle_delete_observation)
         self.app.router.add_delete("/api/observations/batch", self.handle_batch_delete_observations)
@@ -583,6 +585,106 @@ class WebServer:
             })
         except Exception as e:
             logger.error(f"Error getting diary: {e}")
+            return self._err(str(e))
+
+    @staticmethod
+    def _parse_diary_date(date_str: str) -> date | None:
+        try:
+            return datetime.strptime(str(date_str or "").strip(), "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    def _get_diary_markdown_path(self, target_date: date) -> Path:
+        return Path(self.data_dir) / f"diary_{target_date.strftime('%Y%m%d')}.md"
+
+    def _get_diary_summary_path(self, target_date: date) -> Path:
+        helper = getattr(self.plugin, "_get_diary_summary_path", None)
+        if callable(helper):
+            try:
+                return Path(helper(target_date))
+            except Exception as e:
+                logger.debug(f"读取日记摘要路径失败，已回退默认路径: {e}")
+        return Path(self.data_dir) / f"diary_{target_date.strftime('%Y%m%d')}.summary.json"
+
+    def _drop_diary_metadata(self, date_str: str) -> bool:
+        metadata = getattr(self.plugin, "diary_metadata", None)
+        if not isinstance(metadata, dict) or date_str not in metadata:
+            return False
+        metadata.pop(date_str, None)
+        saver = getattr(self.plugin, "_save_diary_metadata", None)
+        if callable(saver):
+            saver()
+        return True
+
+    def _delete_diary_artifacts(self, target_date: date) -> dict[str, Any]:
+        removed_files: list[str] = []
+        removed_any = False
+        for path in (
+            self._get_diary_markdown_path(target_date),
+            self._get_diary_summary_path(target_date),
+        ):
+            try:
+                if path.exists():
+                    path.unlink()
+                    removed_files.append(path.name)
+                    removed_any = True
+            except Exception as e:
+                logger.error(f"删除日记文件失败: {path} - {e}")
+                raise
+
+        metadata_removed = self._drop_diary_metadata(target_date.isoformat())
+        return {
+            "date": target_date.isoformat(),
+            "removed": removed_any or metadata_removed,
+            "removed_files": removed_files,
+            "metadata_removed": metadata_removed,
+        }
+
+    async def handle_delete_diary(self, request):
+        """删除单篇日记及其附属摘要。"""
+        try:
+            target_date = self._parse_diary_date(request.match_info["date"])
+            if not target_date:
+                return self._err("日期格式无效，应为 YYYY-MM-DD", 400)
+
+            result = self._delete_diary_artifacts(target_date)
+            if not result["removed"]:
+                return self._err("没有找到对应的日记", 404)
+            return self._ok(result)
+        except Exception as e:
+            logger.error(f"删除日记失败: {e}")
+            return self._err(str(e))
+
+    async def handle_batch_delete_diaries(self, request):
+        """批量删除多篇日记及其附属摘要。"""
+        try:
+            payload = await request.json()
+            dates = payload.get("dates", [])
+            if not isinstance(dates, list) or not dates:
+                return self._err("请提供要删除的日期列表", 400)
+
+            deleted_items: list[dict[str, Any]] = []
+            missing_dates: list[str] = []
+            for raw_date in dates:
+                target_date = self._parse_diary_date(str(raw_date or "").strip())
+                if not target_date:
+                    missing_dates.append(str(raw_date or "").strip())
+                    continue
+                result = self._delete_diary_artifacts(target_date)
+                if result["removed"]:
+                    deleted_items.append(result)
+                else:
+                    missing_dates.append(target_date.isoformat())
+
+            return self._ok(
+                {
+                    "deleted_count": len(deleted_items),
+                    "deleted_dates": [item["date"] for item in deleted_items],
+                    "missing_dates": missing_dates,
+                }
+            )
+        except Exception as e:
+            logger.error(f"批量删除日记失败: {e}")
             return self._err(str(e))
 
     @staticmethod
@@ -2931,7 +3033,7 @@ class WebServer:
                 "enable_input_stats": {
                     "description": "启用本地输入统计",
                     "type": "bool",
-                    "hint": "开启后会尝试监听全局键盘和鼠标输入，用于生成更像 KeyStats 的活动回顾。默认依赖已随基础安装提供，但系统可能仍需授予输入监听权限。",
+                    "hint": "开启后会尝试监听全局键盘和鼠标输入，用于补充键盘和鼠标维度的活动回顾。默认依赖已随基础安装提供，但系统可能仍需授予输入监听权限。",
                     "default": False,
                 },
                 "enable_background_activity_tracking": {
@@ -2993,7 +3095,7 @@ class WebServer:
                 "mask_activity_window_titles": {
                     "description": "活动页窗口标题脱敏",
                     "type": "bool",
-                    "hint": "开启后，活动统计、主力窗口和工作轨迹里的窗口标题会统一脱敏，更接近 Work_Review 的隐私感知使用体验。",
+                    "hint": "开启后，活动统计、主力窗口和工作轨迹里的窗口标题会统一脱敏，整体更偏向隐私保护的活动回顾体验。",
                     "default": False,
                 },
                 "activity_recognition_rules": {

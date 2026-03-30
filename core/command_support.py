@@ -430,46 +430,10 @@ class ScreenCompanionCommandSupportMixin:
             # 更新日记查看状态
             date_str = target_date.strftime("%Y%m%d")
             self._update_diary_view_status(date_str)
-
-            # 提取感想部分
-            summary_start = diary_content.find("## 今日感想")
-            if summary_start != -1:
-                summary_content = diary_content[summary_start:]
-                # 提取感想文本并去除标题
-                summary_lines = summary_content.split('\n')
-                # 跳过标题行和空行
-                start_idx = 2
-                while start_idx < len(summary_lines) and (summary_lines[start_idx].strip().startswith('#') or not summary_lines[start_idx].strip()):
-                    start_idx += 1
-                summary_text = '\n'.join(summary_lines[start_idx:]).strip()
-                summary_text = self._extract_diary_preview_text(summary_text)
-                if len(summary_text) > 500:
-                    summary_text = summary_text[:497] + "..."
-                diary_message = f"{self.bot_name} 的日记\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text or '这篇日记里还没有整理出完整感想。'}"
-            else:
-                # 尝试提取旧格式的总结部分
-                summary_start = diary_content.find(f"## {self.bot_name}的总结")
-                if summary_start == -1:
-                    summary_start = diary_content.find("## 总结")
-                if summary_start != -1:
-                    summary_content = diary_content[summary_start:]
-                    # 提取总结文本并去除标题
-                    summary_lines = summary_content.split('\n')
-                    summary_text = self._extract_diary_preview_text('\n'.join(summary_lines[2:]).strip())
-                    if len(summary_text) > 500:
-                        summary_text = summary_text[:497] + "..."
-                    diary_message = f"{self.bot_name} 的日记\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text or '这篇日记里还没有整理出完整感想。'}"
-                else:
-                    observation_start = diary_content.find("## 今日观察")
-                    if observation_start != -1:
-                        observation_content = diary_content[observation_start:]
-                        observation_lines = observation_content.split('\n')
-                        observation_text = self._extract_diary_preview_text('\n'.join(observation_lines[2:]).strip())
-                        if len(observation_text) > 500:
-                            observation_text = observation_text[:497] + "..."
-                        diary_message = f"{self.bot_name} 的日记\n{target_date.strftime('%Y年%m月%d日')}\n\n{observation_text or '这篇日记里还没有可展示的内容。'}"
-                    else:
-                        diary_message = self._extract_diary_preview_text(diary_content) or "这篇日记里还没有可展示的内容。"
+            diary_message = self._format_diary_preview_message(
+                target_date,
+                diary_content,
+            )
 
             if self.diary_auto_recall:
                 logger.info(f"日记消息将在 {self.diary_recall_time} 秒后自动撤回")

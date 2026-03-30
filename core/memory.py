@@ -1884,6 +1884,20 @@ class ScreenCompanionMemoryMixin:
 
         return "\n".join(lines).strip()[:500]
 
+    def _format_diary_preview_message(
+        self,
+        target_date: datetime.date,
+        diary_content: str,
+    ) -> str:
+        preview_text = self._extract_diary_preview_text(diary_content)
+        if len(preview_text) > 500:
+            preview_text = preview_text[:497] + "..."
+        return (
+            f"{self.bot_name} 的日记\n"
+            f"{target_date.strftime('%Y年%m月%d日')}\n\n"
+            f"{preview_text or '这篇日记里还没有可展示的内容。'}"
+        )
+
     def _get_diary_summary_path(self, target_date: datetime.date) -> str:
         return os.path.join(
             self.diary_storage,

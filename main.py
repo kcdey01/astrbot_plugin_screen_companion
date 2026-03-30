@@ -497,6 +497,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 "- /kpi learned 查看最近自动学到的自然反馈",
                 "- /kpi unlearn 1 删除一条误学记录",
                 "- /kpi correct 原回复 纠正后的回复",
+                "- /kpi jk 查看今日本地输入统计",
                 "",
                 "诊断维护：",
                 "- /kpi status 查看运行状态和最近学习动态",
@@ -1409,6 +1410,62 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
 
     @permission_type(PermissionType.ADMIN)
+    @kpi_group.command("jk")
+    async def kpi_jk(self, event: AstrMessageEvent):
+        """查看今日本地输入统计。"""
+        report_text = self._format_today_input_stats_text()
+
+        if not self.enable_input_stats:
+            yield event.plain_result(report_text)
+            return
+
+        if not self.use_llm_for_start_end:
+            yield event.plain_result(report_text)
+            return
+
+        provider = self.context.get_using_provider()
+        if not provider:
+            yield event.plain_result(report_text)
+            return
+
+        try:
+            stats_report = self._build_today_input_stats_report()
+            if not stats_report.get("available"):
+                yield event.plain_result(report_text)
+                return
+
+            today = stats_report.get("today", {}) if isinstance(stats_report.get("today"), dict) else {}
+            llm_prompt = "\n".join(
+                [
+                    "请把下面这份“今日本地输入统计”整理成一段自然、简短、具体的中文回顾。",
+                    "要求：",
+                    "1. 保留数据感，但不要逐项机械复述成报表。",
+                    "2. 可以点出今天大致忙不忙、输入节奏是否集中，但不要过度脑补。",
+                    "3. 不要输出标题，不要使用 Markdown 列表。",
+                    "4. 控制在 80 到 160 字。",
+                    "",
+                    f"键盘：{today.get('keys_label', '0 次')}",
+                    f"点击：{today.get('clicks_label', '0 次')}",
+                    f"滚轮：{today.get('scroll_steps_label', '0 格')}",
+                    f"鼠标移动：{today.get('moves_label', '0 段')} / {today.get('move_pixels_label', '0 px')}",
+                    f"活跃分钟：{today.get('active_minutes_label', '0 分钟')}",
+                    f"输入总量：{today.get('total_inputs_label', '0 次')}",
+                    f"高峰时段：{today.get('peak_hour_label', '暂无')}",
+                    f"活跃区间：{stats_report.get('active_ranges_label', '暂无')}",
+                    f"最近一次输入：{today.get('last_event_time_label', '暂无') or '暂无'}",
+                    f"当前在场感：{stats_report.get('presence_label', '未知')}",
+                    f"在场感说明：{stats_report.get('presence_detail', '暂无') or '暂无'}",
+                ]
+            )
+            system_prompt = await self._get_persona_prompt(event.unified_msg_origin)
+            response = await provider.text_chat(prompt=llm_prompt, system_prompt=system_prompt)
+            llm_text = str(getattr(response, "completion_text", "") or "").strip()
+            yield event.plain_result(llm_text or report_text)
+        except Exception as e:
+            logger.error(f"生成输入统计二次加工回复失败: {e}")
+            yield event.plain_result(report_text)
+
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("correct")
     async def kpi_correct(self, event: AstrMessageEvent, *args):
         """纠正 Bot 的回复。"""
@@ -1605,35 +1662,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             self.background_tasks.append(task)
 
         for diary in found_diaries:
-            # 提取感想部分
-            summary_start = diary['content'].find("## 今日感想")
-            if summary_start != -1:
-                summary_content = diary['content'][summary_start:]
-                # 提取感想文本并去除标题
-                summary_lines = summary_content.split('\n')
-                summary_text = self._extract_diary_preview_text('\n'.join(summary_lines[2:]).strip())
-                if len(summary_text) > 500:
-                    summary_text = summary_text[:497] + "..."
-                diary_message = f"{self.bot_name} 的日记\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text or '这篇日记里还没有整理出完整感想。'}"
-            else:
-                # 尝试提取旧格式的总结部分
-                summary_start = diary['content'].find(f"## {self.bot_name}的总结")
-                if summary_start == -1:
-                    summary_start = diary['content'].find("## 总结")
-                if summary_start != -1:
-                    summary_content = diary['content'][summary_start:]
-                    # 提取总结文本并去除标题
-                    summary_lines = summary_content.split('\n')
-                    summary_text = self._extract_diary_preview_text('\n'.join(summary_lines[2:]).strip())
-                    if len(summary_text) > 500:
-                        summary_text = summary_text[:497] + "..."
-                    diary_message = f"{self.bot_name} 的日记\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text or '这篇日记里还没有整理出完整感想。'}"
-                else:
-                    # 如果没有总结段落，则回退到整篇日记内容
-                    diary_text = self._extract_diary_preview_text(diary["content"])
-                    if len(diary_text) > 500:
-                        diary_text = diary_text[:497] + "..."
-                    diary_message = f"{self.bot_name} 的日记\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary_text or '这篇日记里还没有可展示的内容。'}"
+            diary_message = self._format_diary_preview_message(
+                diary["date"],
+                diary["content"],
+            )
             
             send_as_image = self.diary_send_as_image
             

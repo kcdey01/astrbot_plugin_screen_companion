@@ -4,6 +4,7 @@ const state = {
     activeSection: "diaries",
     diaryDates: [],
     selectedDiaryDate: "",
+    selectedDiaryDates: new Set(),
     observations: [],
     selectedObservationIndices: new Set(),
     observationPage: 1,
@@ -55,6 +56,11 @@ const elements = {
     diaryMeta: document.getElementById("diaryMeta"),
     diarySummary: document.getElementById("diarySummary"),
     diaryDateInput: document.getElementById("diaryDateInput"),
+    diarySelectionMeta: document.getElementById("diarySelectionMeta"),
+    selectAllDiaries: document.getElementById("selectAllDiaries"),
+    clearDiarySelectionsButton: document.getElementById("clearDiarySelectionsButton"),
+    deleteSelectedDiariesButton: document.getElementById("deleteSelectedDiariesButton"),
+    deleteCurrentDiaryButton: document.getElementById("deleteCurrentDiaryButton"),
     observationList: document.getElementById("observationList"),
     observationMeta: document.getElementById("observationMeta"),
     observationPagination: document.getElementById("observationPagination"),
@@ -268,15 +274,15 @@ function buildSettingsSaveFailureMessage(error, context = {}) {
     const touchesWebui = Boolean(context.touchesWebui);
     if (isNetworkError(error)) {
         return touchesWebui
-            ? `保存请求已发出，但当前 WebUI 可能正在按新配置重启。请稍等几秒后刷新；如果改了 host 或 port，请按新地址访问。`
-            : `保存时没有拿到响应。通常是当前 WebUI 实例短暂失联，请刷新后确认刚才改的 ${changedCount || "这些"} 项是否已经生效。`;
+            ? "保存请求已发出，WebUI 可能正在重启。"
+            : `保存请求已发出，请刷新确认 ${changedCount || "这些"} 项是否生效。`;
     }
     return `保存失败: ${error.message}`;
 }
 
 function buildRuntimeSaveFailureMessage(error) {
     if (isNetworkError(error)) {
-        return "运行设置提交后没有拿到响应，WebUI 可能短暂重连中。请稍等几秒刷新，再确认设置是否已生效。";
+        return "保存请求已发出，请刷新确认是否生效。";
     }
     return `保存失败: ${error.message}`;
 }
@@ -560,7 +566,7 @@ function renderInputStatsSection(inputStats) {
     if (!elements.activityInputStats || !elements.activityInputDays) return;
 
     if (!inputStats || !inputStats.enabled) {
-        elements.activityInputStats.innerHTML = "<div class='empty-state'><strong>未启用本地输入统计</strong><p>如果你想看更像 KeyStats 的键鼠节奏，可以在配置中心开启这个可选功能。</p></div>";
+        elements.activityInputStats.innerHTML = "<div class='empty-state'><strong>未启用本地输入统计</strong><p>如果你想看更细的键鼠节奏，可以在配置中心开启这个可选功能。</p></div>";
         elements.activityInputDays.innerHTML = "";
         return;
     }
@@ -671,13 +677,17 @@ function renderActivitySessions(sessionData) {
     elements.activitySessions.innerHTML = sessions.map((item) => {
         const toneClass = item.tone ? ` activity-session-card--${escapeHtml(item.tone)}` : "";
         const tags = [
-            item.top_window,
-            item.top_app,
+            item.top_window
+                ? renderWindowCompanionTag(truncateLabel(item.top_window, 24), item.top_window, "activity")
+                : "",
+            item.top_app ? `<span class="tag">${escapeHtml(item.top_app)}</span>` : "",
             item.top_site,
             item.source_mix_label,
             item.switch_count_label,
             item.entry_count_label,
-        ].filter(Boolean);
+        ].filter(Boolean).map((tag) => (
+            tag.startsWith("<") ? tag : `<span class="tag">${escapeHtml(tag)}</span>`
+        ));
         const effectiveNote = item.effective_note
             ? `<p class="memory-meta">${escapeHtml(item.effective_note)}</p>`
             : "";
@@ -690,7 +700,7 @@ function renderActivitySessions(sessionData) {
                     </div>
                     <strong>${escapeHtml(item.duration || "0分钟")}</strong>
                 </div>
-                <div class="observation-tags">${tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
+                <div class="observation-tags">${tags.join("")}</div>
                 <p class="memory-meta">${escapeHtml(item.summary || "")}</p>
                 ${effectiveNote}
                 <p class="memory-meta">${escapeHtml(item.continuation_label || "")}</p>
@@ -885,22 +895,135 @@ function setSettingsValues(updates) {
     renderSettingsForm();
 }
 
-function appendWindowCompanionTarget(title) {
-    const target = String(title ?? "").trim();
-    if (!target) return;
+function applySettingsPayload(settings) {
+    const nextSettings = settings || {};
+    state.settingsSchema = nextSettings.schema || state.settingsSchema;
+    state.settingsValues = nextSettings.values || state.settingsValues;
+    state.settingsSnapshot = { ...(nextSettings.values || state.settingsValues) };
+    state.settingsGroups = nextSettings.groups || state.settingsGroups;
 
-    const current = String(state.settingsValues.window_companion_targets || "")
+    if (!state.settingsGroups.some((group) => group.id === state.activeSettingsGroup)) {
+        state.activeSettingsGroup = state.settingsGroups[0]?.id || "";
+    }
+
+    renderSettingsGroups();
+    renderSettingsForm();
+}
+
+function canQuickAddWindowCompanionTitle(title) {
+    const text = String(title ?? "").trim();
+    if (!text) return false;
+    if (["未命名窗口", "当前窗口"].includes(text)) return false;
+    if (text.startsWith("已脱敏")) return false;
+    return true;
+}
+
+function collectWindowCompanionTargets() {
+    return String(state.settingsValues.window_companion_targets || "")
         .split(/\r?\n/)
         .map((item) => item.trim())
         .filter(Boolean);
+}
 
-    const exists = current.some((item) => item.split("|", 1)[0].trim().toLowerCase() === target.toLowerCase());
+function isWindowCompanionTargetConfigured(title) {
+    const target = String(title ?? "").trim().toLowerCase();
+    if (!target) return false;
+    return collectWindowCompanionTargets().some(
+        (item) => item.split("|", 1)[0].trim().toLowerCase() === target
+    );
+}
+
+function buildWindowCompanionTargetUpdate(title) {
+    const target = String(title ?? "").trim();
+    if (!target) return null;
+
+    const current = collectWindowCompanionTargets();
+    const exists = current.some(
+        (item) => item.split("|", 1)[0].trim().toLowerCase() === target.toLowerCase()
+    );
     if (!exists) current.push(target);
 
-    setSettingsValues({
-        enable_window_companion: true,
-        window_companion_targets: current.join("\n"),
+    return {
+        target,
+        exists,
+        updates: {
+            enable_window_companion: true,
+            window_companion_targets: current.join("\n"),
+        },
+    };
+}
+
+function appendWindowCompanionTarget(title) {
+    const payload = buildWindowCompanionTargetUpdate(title);
+    if (!payload) return null;
+    setSettingsValues(payload.updates);
+    return payload;
+}
+
+function renderWindowCompanionTag(label, title, feedbackScope = "activity") {
+    const displayLabel = String(label ?? "").trim();
+    const target = String(title ?? "").trim();
+    if (!displayLabel) return "";
+    if (!canQuickAddWindowCompanionTitle(target)) {
+        return `<span class="tag">${escapeHtml(displayLabel)}</span>`;
+    }
+
+    const configured = isWindowCompanionTargetConfigured(target);
+    const buttonTitle = configured
+        ? "这个窗口已经在窗口陪伴目标里，点一下可确保窗口陪伴已开启。"
+        : "将这个窗口加入窗口陪伴目标并立即生效。";
+    return `
+        <button
+            type="button"
+            class="tag tag-button${configured ? " tag-button--active" : ""}"
+            data-window-companion-title="${escapeHtml(target)}"
+            data-window-companion-feedback="${escapeHtml(feedbackScope)}"
+            title="${escapeHtml(buttonTitle)}"
+        >
+            <span>${escapeHtml(displayLabel)}</span>
+            <span class="tag-action-mark">${configured ? "已陪伴" : "+陪伴"}</span>
+        </button>
+    `;
+}
+
+function setWindowCompanionQuickAddFeedback(scope, message, tone = "success") {
+    if (!message) return;
+
+    if (scope === "observations" && elements.observationMeta) {
+        elements.observationMeta.textContent = message;
+        return;
+    }
+    if (scope === "activity" && elements.activityFilterSummary) {
+        elements.activityFilterSummary.textContent = message;
+        return;
+    }
+    if (scope === "diary" && elements.diarySummary) {
+        elements.diarySummary.textContent = message;
+        return;
+    }
+
+    setFeedbackMessage(elements.settingsFeedback, message, tone);
+}
+
+async function quickAddWindowCompanionTarget(title, feedbackScope = "activity") {
+    const payload = buildWindowCompanionTargetUpdate(title);
+    if (!payload) {
+        throw new Error("窗口标题不可用");
+    }
+
+    const alreadyEnabled = payload.exists && Boolean(state.settingsValues.enable_window_companion);
+    if (alreadyEnabled) {
+        return { ...payload, alreadyEnabled: true };
+    }
+
+    const data = await apiFetch("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({ updates: payload.updates }),
     });
+    applySettingsPayload(data.settings || {});
+    await loadRuntime();
+    await loadHealth();
+    return { ...payload, alreadyEnabled: false };
 }
 
 function switchSettingsGroup(groupId) {
@@ -1009,7 +1132,7 @@ function renderRuntimeInsights(runtime) {
             title: "工作脉搏",
             body: runtime.activity_pulse?.summary
                 ? `${runtime.activity_pulse.summary} ${runtime.activity_pulse.detail || ""}`.trim()
-                : "活动页会把当前活动、输入在场感和隐私状态整合成一个更像 Work_Review 的工作脉搏视角。",
+                : "活动页会把当前活动、输入在场感和隐私状态整合成一个更完整的工作脉搏视角。",
             actions: [],
         },
         {
@@ -1058,7 +1181,7 @@ function renderRuntimeInsights(runtime) {
             title: "\u672c\u5730\u8f93\u5165\u7edf\u8ba1",
             body: runtime.input_stats?.enabled
                 ? `${runtime.input_stats?.detail || "\u672c\u5730\u8f93\u5165\u7edf\u8ba1\u5df2\u5f00\u542f\u3002"}${runtime.input_stats?.presence_label ? ` \u5f53\u524d${runtime.input_stats.presence_label}\u3002` : ""}${runtime.input_stats?.today?.keys_label ? ` \u4eca\u65e5\u6309\u952e ${runtime.input_stats.today.keys_label}\uff0c\u70b9\u51fb ${runtime.input_stats.today.clicks_label || "0 \u6b21"}\u3002` : ""}`
-                : "\u9ed8\u8ba4\u5173\u95ed\u3002\u5f00\u542f\u540e\u4f1a\u8bb0\u5f55\u952e\u76d8\u548c\u9f20\u6807\u8f93\u5165\uff0c\u7528\u6765\u751f\u6210\u66f4\u50cf KeyStats \u7684\u8f7b\u91cf\u56de\u987e\u3002",
+                : "\u9ed8\u8ba4\u5173\u95ed\u3002\u5f00\u542f\u540e\u4f1a\u8bb0\u5f55\u952e\u76d8\u548c\u9f20\u6807\u8f93\u5165\uff0c\u7528\u6765\u751f\u6210\u8f7b\u91cf\u7684\u8f93\u5165\u56de\u987e\u3002",
             actions: [{ label: "\u524d\u5f80\u672c\u5730\u7edf\u8ba1\u8bbe\u7f6e", action: "open-analytics-group" }],
         },
         {
@@ -1662,7 +1785,7 @@ function renderDiaryObservationTimeline(entries) {
                 <div class="diary-observation-main">
                     <div class="diary-observation-head">
                         <span class="diary-observation-time">${escapeHtml(entry.time)}</span>
-                        <span class="diary-observation-window">${escapeHtml(entry.windowTitle)}</span>
+                        ${renderWindowCompanionTag(entry.windowTitle, entry.windowTitle, "diary")}
                     </div>
                     ${bodyHtml}
                 </div>
@@ -1738,8 +1861,65 @@ function splitDiaryContent(content) {
     return sections;
 }
 
+function pruneDiarySelections() {
+    const availableDates = new Set((state.diaryDates || []).map((entry) => entry.date).filter(Boolean));
+    Array.from(state.selectedDiaryDates).forEach((date) => {
+        if (!availableDates.has(date)) state.selectedDiaryDates.delete(date);
+    });
+}
+
+function pickDiaryFallbackDate(removedDates = []) {
+    const removed = new Set((removedDates || []).filter(Boolean));
+    const remainingDates = (state.diaryDates || [])
+        .map((entry) => entry.date)
+        .filter((date) => date && !removed.has(date));
+    if (state.selectedDiaryDate && !removed.has(state.selectedDiaryDate) && remainingDates.includes(state.selectedDiaryDate)) {
+        return state.selectedDiaryDate;
+    }
+    return remainingDates[0] || new Date().toISOString().slice(0, 10);
+}
+
+function buildDiaryDeleteConfirmMessage(dates) {
+    const validDates = (dates || []).filter(Boolean);
+    if (!validDates.length) return "";
+    if (validDates.length === 1) {
+        return `确定删除 ${formatDateLabel(validDates[0])} 的日记吗？\n对应正文和概览摘要会一起删除，且无法恢复。`;
+    }
+    const preview = validDates.slice(0, 3).map((date) => formatDateLabel(date)).join("、");
+    const suffix = validDates.length > 3 ? " 等" : "";
+    return `确定批量删除这 ${validDates.length} 篇日记吗？\n${preview}${suffix}\n对应正文和概览摘要会一起删除，且无法恢复。`;
+}
+
+function syncDiarySelectionUi() {
+    const total = state.diaryDates.length;
+    const selectedCount = state.selectedDiaryDates.size;
+    const hasDiaries = total > 0;
+    const allSelected = hasDiaries && selectedCount === total;
+
+    elements.selectAllDiaries.checked = allSelected;
+    elements.selectAllDiaries.indeterminate = selectedCount > 0 && selectedCount < total;
+    elements.selectAllDiaries.disabled = !hasDiaries;
+    elements.clearDiarySelectionsButton.disabled = selectedCount === 0;
+    elements.deleteSelectedDiariesButton.disabled = selectedCount === 0;
+
+    const currentDiaryExists = state.diaryDates.some((entry) => entry.date === state.selectedDiaryDate);
+    elements.deleteCurrentDiaryButton.disabled = !currentDiaryExists;
+
+    if (!hasDiaries) {
+        elements.diarySelectionMeta.textContent = "还没有可删除的日记。";
+        return;
+    }
+    if (!selectedCount) {
+        elements.diarySelectionMeta.textContent = "还没有选择要删除的日记。";
+        return;
+    }
+    elements.diarySelectionMeta.textContent = `已选择 ${selectedCount} / ${total} 篇日记。`;
+}
+
 function renderDiaryList() {
     elements.diaryList.innerHTML = "";
+    pruneDiarySelections();
+    syncDiarySelectionUi();
     if (state.diaryDates.length === 0) {
         elements.diaryList.appendChild(cloneEmptyState());
         elements.diarySummary.textContent = "还没有生成任何日记。";
@@ -1747,20 +1927,52 @@ function renderDiaryList() {
     }
 
     elements.diarySummary.textContent = `共 ${state.diaryDates.length} 篇日记，默认打开最近日期。`;
-    state.diaryDates.slice(0, 14).forEach((entry) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "list-item-button";
-        if (entry.date === state.selectedDiaryDate) button.classList.add("active");
-        button.innerHTML = `
-            <p class="list-item-title">${escapeHtml(formatDateLabel(entry.date))}</p>
-            <p class="list-item-meta">文件名 ${escapeHtml(entry.filename)}</p>
+    state.diaryDates.forEach((entry) => {
+        const card = document.createElement("article");
+        card.className = "diary-list-item";
+        if (entry.date === state.selectedDiaryDate) card.classList.add("active");
+        const selected = state.selectedDiaryDates.has(entry.date);
+        card.innerHTML = `
+            <div class="diary-list-item-top">
+                <label class="observation-select diary-select">
+                    <input type="checkbox" ${selected ? "checked" : ""}>
+                    <span>选择</span>
+                </label>
+                <button class="danger-button diary-delete-button" type="button">删除</button>
+            </div>
+            <button class="list-item-button diary-open-button ${entry.date === state.selectedDiaryDate ? "active" : ""}" type="button">
+                <p class="list-item-title">${escapeHtml(formatDateLabel(entry.date))}</p>
+                <p class="list-item-meta">文件名 ${escapeHtml(entry.filename)}</p>
+            </button>
         `;
-        button.addEventListener("click", () => {
+        const checkbox = card.querySelector('input[type="checkbox"]');
+        checkbox.addEventListener("change", () => {
+            if (checkbox.checked) state.selectedDiaryDates.add(entry.date);
+            else state.selectedDiaryDates.delete(entry.date);
+            syncDiarySelectionUi();
+        });
+
+        const openButton = card.querySelector(".diary-open-button");
+        openButton.addEventListener("click", () => {
             elements.diaryDateInput.value = entry.date;
             loadDiaryDetail(entry.date);
         });
-        elements.diaryList.appendChild(button);
+
+        const deleteButton = card.querySelector(".diary-delete-button");
+        deleteButton.addEventListener("click", async () => {
+            const confirmed = confirm(buildDiaryDeleteConfirmMessage([entry.date]));
+            if (!confirmed) return;
+            deleteButton.disabled = true;
+            try {
+                await deleteDiary(entry.date);
+                elements.diarySelectionMeta.textContent = `已删除 ${formatDateLabel(entry.date)} 的日记。`;
+            } catch (error) {
+                deleteButton.disabled = false;
+                elements.diarySelectionMeta.textContent = `删除失败: ${error.message}`;
+            }
+        });
+
+        elements.diaryList.appendChild(card);
     });
 }
 
@@ -1854,6 +2066,7 @@ function renderDiaryDetail(date, content, structuredSummary = {}) {
     state.selectedDiaryDate = date;
     elements.diaryDateInput.value = date || "";
     renderDiaryList();
+    syncDiarySelectionUi();
     elements.diaryTitle.textContent = date ? `${formatDateLabel(date)} 的日记` : "日记内容";
     elements.diaryMeta.textContent = content ? "已加载完整内容" : "这一天还没有写入内容";
     elements.diarySummary.textContent = buildDiarySummaryText(structuredSummary);
@@ -1953,6 +2166,37 @@ async function deleteObservation(index) {
     updateSummaryCards();
 }
 
+async function deleteDiary(date) {
+    await apiFetch(`/api/diary/${date}`, { method: "DELETE" });
+    state.selectedDiaryDates.delete(date);
+    const fallbackDate = pickDiaryFallbackDate([date]);
+    if (state.selectedDiaryDate === date) {
+        state.selectedDiaryDate = fallbackDate;
+    }
+    await loadRuntime();
+    await loadDiaries(fallbackDate);
+    updateSummaryCards();
+}
+
+async function deleteSelectedDiaries() {
+    const dates = Array.from(state.selectedDiaryDates);
+    if (!dates.length) return { deletedCount: 0, deletedDates: [] };
+    const fallbackDate = pickDiaryFallbackDate(dates);
+    const data = await apiFetch("/api/diaries/batch", {
+        method: "DELETE",
+        body: JSON.stringify({ dates }),
+    });
+    dates.forEach((date) => state.selectedDiaryDates.delete(date));
+    state.selectedDiaryDate = fallbackDate;
+    await loadRuntime();
+    await loadDiaries(fallbackDate);
+    updateSummaryCards();
+    return {
+        deletedCount: Number(data.deleted_count || 0),
+        deletedDates: Array.isArray(data.deleted_dates) ? data.deleted_dates : [],
+    };
+}
+
 async function deleteSelectedObservations() {
     const indices = Array.from(state.selectedObservationIndices);
     if (!indices.length) return;
@@ -1984,7 +2228,13 @@ function renderObservationList() {
         const selected = state.selectedObservationIndices.has(observation.index);
         const tags = [
             observation.scene ? `<span class="tag">${escapeHtml(observation.scene)}</span>` : "",
-            observation.active_window ? `<span class="tag">${escapeHtml(observation.active_window)}</span>` : "",
+            observation.active_window
+                ? renderWindowCompanionTag(
+                    truncateLabel(observation.active_window, 24),
+                    observation.active_window,
+                    "observations"
+                )
+                : "",
             observation.time_period ? `<span class="tag">${escapeHtml(observation.time_period)}</span>` : "",
         ].filter(Boolean).join("");
 
@@ -2203,18 +2453,7 @@ async function loadHealth() {
 
 async function loadSettings() {
     const data = await apiFetch("/api/settings");
-    const settings = data.settings || {};
-    state.settingsSchema = settings.schema || {};
-    state.settingsValues = settings.values || {};
-    state.settingsSnapshot = { ...(settings.values || {}) };
-    state.settingsGroups = settings.groups || [];
-
-    if (!state.settingsGroups.some((group) => group.id === state.activeSettingsGroup)) {
-        state.activeSettingsGroup = state.settingsGroups[0]?.id || "";
-    }
-
-    renderSettingsGroups();
-    renderSettingsForm();
+    applySettingsPayload(data.settings || {});
 }
 
 async function loadWindowCandidates() {
@@ -2223,13 +2462,16 @@ async function loadWindowCandidates() {
     renderSettingsForm();
 }
 
-async function loadDiaries() {
+async function loadDiaries(preferredDate = "") {
     renderLoading(elements.diaryList, "正在整理日记列表...");
     const data = await apiFetch("/api/diaries");
     state.diaryDates = data.diaries || [];
-    if (!state.selectedDiaryDate) {
-        state.selectedDiaryDate = state.diaryDates[0]?.date || new Date().toISOString().slice(0, 10);
-    }
+    pruneDiarySelections();
+    const desiredDate = preferredDate || state.selectedDiaryDate;
+    const hasDesiredDate = state.diaryDates.some((entry) => entry.date === desiredDate);
+    state.selectedDiaryDate = hasDesiredDate
+        ? desiredDate
+        : state.diaryDates[0]?.date || desiredDate || new Date().toISOString().slice(0, 10);
     renderDiaryList();
     await loadDiaryDetail(state.selectedDiaryDate);
 }
@@ -2427,12 +2669,17 @@ function renderActivityStats() {
         const windowName = activity.window || "未命名窗口";
         const pageTitle = activity.page_title ? truncateLabel(activity.page_title, 22) : "";
         const tags = [
-            activity.app_name || "",
-            activity.site_label || "",
-            pageTitle ? `页面 ${pageTitle}` : "",
-            activity.capture_source_label || "",
-            activity.duration || "",
-            activity.has_input_estimate ? `有效 ${activity.effective_duration || activity.duration || "0分钟"}` : "",
+            canQuickAddWindowCompanionTitle(windowName)
+                ? renderWindowCompanionTag(truncateLabel(windowName, 24), windowName, "activity")
+                : "",
+            activity.app_name ? `<span class="tag">${escapeHtml(activity.app_name)}</span>` : "",
+            activity.site_label ? `<span class="tag">${escapeHtml(activity.site_label)}</span>` : "",
+            pageTitle ? `<span class="tag">${escapeHtml(`页面 ${pageTitle}`)}</span>` : "",
+            activity.capture_source_label ? `<span class="tag">${escapeHtml(activity.capture_source_label)}</span>` : "",
+            activity.duration ? `<span class="tag">${escapeHtml(activity.duration)}</span>` : "",
+            activity.has_input_estimate
+                ? `<span class="tag">${escapeHtml(`有效 ${activity.effective_duration || activity.duration || "0分钟"}`)}</span>`
+                : "",
         ].filter(Boolean);
         const surfaceDetail = activity.page_title
             ? `${activity.site_label || activity.app_name || "当前应用"} 的 ${activity.page_title}`
@@ -2446,7 +2693,7 @@ function renderActivityStats() {
                     <div>
                         <h3 class="list-item-title">${escapeHtml(title)}</h3>
                         <div class="observation-tags">
-                            ${tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}
+                            ${tags.join("")}
                         </div>
                     </div>
                     <span class="activity-record-range">${escapeHtml(timeRange)}</span>
@@ -2539,6 +2786,58 @@ elements.diaryDateInput.addEventListener("change", async () => {
     if (elements.diaryDateInput.value) await loadDiaryDetail(elements.diaryDateInput.value);
 });
 
+elements.selectAllDiaries.addEventListener("change", () => {
+    if (elements.selectAllDiaries.checked) {
+        state.diaryDates.forEach((entry) => state.selectedDiaryDates.add(entry.date));
+    } else {
+        state.selectedDiaryDates.clear();
+    }
+    renderDiaryList();
+});
+
+elements.clearDiarySelectionsButton.addEventListener("click", () => {
+    state.selectedDiaryDates.clear();
+    renderDiaryList();
+});
+
+elements.deleteSelectedDiariesButton.addEventListener("click", async () => {
+    const dates = Array.from(state.selectedDiaryDates);
+    if (!dates.length) {
+        elements.diarySelectionMeta.textContent = "请先选择要删除的日记。";
+        return;
+    }
+    const confirmed = confirm(buildDiaryDeleteConfirmMessage(dates));
+    if (!confirmed) return;
+    try {
+        const result = await deleteSelectedDiaries();
+        elements.diarySelectionMeta.textContent = result.deletedCount > 0
+            ? `已删除 ${result.deletedCount} 篇日记。`
+            : "没有找到可删除的日记。";
+    } catch (error) {
+        elements.diarySelectionMeta.textContent = `批量删除失败: ${error.message}`;
+    }
+});
+
+elements.deleteCurrentDiaryButton.addEventListener("click", async () => {
+    const currentDiaryExists = state.diaryDates.some((entry) => entry.date === state.selectedDiaryDate);
+    if (!currentDiaryExists) {
+        elements.diarySelectionMeta.textContent = "当前没有可删除的日记。";
+        return;
+    }
+    const targetDate = state.selectedDiaryDate;
+    const confirmed = confirm(buildDiaryDeleteConfirmMessage([targetDate]));
+    if (!confirmed) return;
+    const originalDisabled = elements.deleteCurrentDiaryButton.disabled;
+    elements.deleteCurrentDiaryButton.disabled = true;
+    try {
+        await deleteDiary(targetDate);
+        elements.diarySelectionMeta.textContent = `已删除 ${formatDateLabel(targetDate)} 的日记。`;
+    } catch (error) {
+        elements.deleteCurrentDiaryButton.disabled = originalDisabled;
+        elements.diarySelectionMeta.textContent = `删除失败: ${error.message}`;
+    }
+});
+
 elements.toggleDiaryObservations.addEventListener("click", () => {
     state.diaryObservationsExpanded = !state.diaryObservationsExpanded;
     elements.diaryObservations.classList.toggle("diary-content-collapsed", !state.diaryObservationsExpanded);
@@ -2603,6 +2902,50 @@ elements.clearSelectionsButton.addEventListener("click", () => {
     state.selectedObservationIndices.clear();
     renderObservationList();
 });
+
+async function handleWindowCompanionQuickAddClick(event) {
+    const button = event.target.closest("[data-window-companion-title]");
+    if (!button) return;
+
+    event.preventDefault();
+    const title = button.dataset.windowCompanionTitle || "";
+    const feedbackScope = button.dataset.windowCompanionFeedback || "activity";
+    const originalDisabled = button.disabled;
+    button.disabled = true;
+
+    try {
+        const result = await quickAddWindowCompanionTarget(title, feedbackScope);
+        if (feedbackScope === "observations") {
+            renderObservationList();
+        } else if (feedbackScope === "diary") {
+            if (state.selectedDiaryDate) {
+                await loadDiaryDetail(state.selectedDiaryDate);
+            }
+        } else {
+            renderActivityStats();
+        }
+        setWindowCompanionQuickAddFeedback(
+            feedbackScope,
+            result.alreadyEnabled
+                ? `“${result.target}” 已经在窗口陪伴目标中。`
+                : `已把“${result.target}”加入窗口陪伴，后续命中时会自动陪伴。`,
+            result.alreadyEnabled ? "warn" : "success"
+        );
+    } catch (error) {
+        setWindowCompanionQuickAddFeedback(
+            feedbackScope,
+            `加入窗口陪伴失败: ${error.message}`,
+            "error"
+        );
+    } finally {
+        button.disabled = originalDisabled;
+    }
+}
+
+elements.diaryObservations.addEventListener("click", handleWindowCompanionQuickAddClick);
+elements.observationList.addEventListener("click", handleWindowCompanionQuickAddClick);
+elements.activitySessions.addEventListener("click", handleWindowCompanionQuickAddClick);
+elements.recentActivities.addEventListener("click", handleWindowCompanionQuickAddClick);
 
 elements.deleteSelectedButton.addEventListener("click", async () => {
     if (!state.selectedObservationIndices.size) {
@@ -2684,7 +3027,7 @@ async function handleSettingsActionClick(event) {
         setSettingsValues({
             enable_natural_language_screen_assist: !Boolean(state.settingsValues.enable_natural_language_screen_assist),
         });
-        setFeedbackMessage(elements.settingsFeedback, "已切换自然语言求助开关，记得保存配置。", "warn");
+        setFeedbackMessage(elements.settingsFeedback, "已切换自然语言求助开关。", "warn");
         return;
     }
     if (action === "vision-live") {
@@ -2693,7 +3036,7 @@ async function handleSettingsActionClick(event) {
             use_shared_screenshot_dir: false,
             shared_screenshot_dir: "",
         });
-        setFeedbackMessage(elements.settingsFeedback, "已切回实时截图推荐值，记得保存配置。", "warn");
+        setFeedbackMessage(elements.settingsFeedback, "已切回实时截图模式。", "warn");
         return;
     }
     if (action === "vision-docker") {
@@ -2701,7 +3044,7 @@ async function handleSettingsActionClick(event) {
         setSettingsValues({
             use_shared_screenshot_dir: true,
         });
-        setFeedbackMessage(elements.settingsFeedback, "已切到共享截图目录模式，记得保存配置。", "warn");
+        setFeedbackMessage(elements.settingsFeedback, "已切到共享截图目录模式。", "warn");
         return;
     }
     if (action === "toggle-window-companion") {
@@ -2709,7 +3052,7 @@ async function handleSettingsActionClick(event) {
         setSettingsValues({
             enable_window_companion: !Boolean(state.settingsValues.enable_window_companion),
         });
-        setFeedbackMessage(elements.settingsFeedback, "已切换窗口自动陪伴开关，记得保存配置。", "warn");
+        setFeedbackMessage(elements.settingsFeedback, "已切换窗口自动陪伴开关。", "warn");
         return;
     }
     if (action === "load-window-candidates") {
@@ -2720,8 +3063,8 @@ async function handleSettingsActionClick(event) {
             setFeedbackMessage(
                 elements.settingsFeedback,
                 state.windowCandidates.length
-                    ? "已载入当前窗口列表，点按钮即可加入陪伴目标。"
-                    : "没有读取到可用窗口，请确认桌面环境和权限正常。",
+                    ? "已载入窗口列表。"
+                    : "没有读取到可用窗口。",
                 state.windowCandidates.length ? "success" : "warn"
             );
         } catch (error) {
@@ -2762,13 +3105,13 @@ elements.runtimeForm.addEventListener("submit", async (event) => {
         state.runtime = data.runtime || null;
         renderRuntime();
         await loadHealth();
-        setFeedbackMessage(elements.runtimeFeedback, "运行设置已保存。", "success");
+        setFeedbackMessage(elements.runtimeFeedback, "已保存。", "success");
     } catch (error) {
         const recovered = isNetworkError(error) ? await waitForWebUiRecovery() : false;
         if (recovered) {
             await loadRuntime();
             await loadHealth();
-            setFeedbackMessage(elements.runtimeFeedback, "运行设置请求后 WebUI 已重新连上，请检查刚才的改动是否已经生效。", "warn");
+            setFeedbackMessage(elements.runtimeFeedback, "WebUI 已重新连上。", "warn");
         } else {
             setFeedbackMessage(elements.runtimeFeedback, buildRuntimeSaveFailureMessage(error), "error");
         }
@@ -2798,14 +3141,14 @@ elements.resetSettingsButton.addEventListener("click", () => {
     state.settingsValues = nextValues;
     renderSettingsGroups();
     renderSettingsForm();
-    setFeedbackMessage(elements.settingsFeedback, "当前分组已恢复为最近一次加载到的值。", "success");
+    setFeedbackMessage(elements.settingsFeedback, "已恢复当前分组。", "success");
 });
 
 elements.saveSettingsButton.addEventListener("click", async () => {
     const updates = collectVisibleSettingsUpdates();
     const changedKeys = Object.keys(updates);
     if (!changedKeys.length) {
-        setFeedbackMessage(elements.settingsFeedback, "当前分组没有新的改动可保存。", "warn");
+        setFeedbackMessage(elements.settingsFeedback, "没有可保存的改动。", "warn");
         return;
     }
 
@@ -2819,18 +3162,12 @@ elements.saveSettingsButton.addEventListener("click", async () => {
             method: "POST",
             body: JSON.stringify({ updates }),
         });
-        const settings = data.settings || {};
-        state.settingsSchema = settings.schema || state.settingsSchema;
-        state.settingsValues = settings.values || state.settingsValues;
-        state.settingsSnapshot = { ...(settings.values || state.settingsValues) };
-        state.settingsGroups = settings.groups || state.settingsGroups;
-        renderSettingsGroups();
-        renderSettingsForm();
+        applySettingsPayload(data.settings || {});
         await loadRuntime();
         await loadHealth();
         setFeedbackMessage(
             elements.settingsFeedback,
-            `已保存 ${Number(data.meta?.applied_count || changedKeys.length)} 项配置，相关运行态已同步刷新。`,
+            `已保存 ${Number(data.meta?.applied_count || changedKeys.length)} 项配置。`,
             "success"
         );
     } catch (error) {
@@ -2842,9 +3179,7 @@ elements.saveSettingsButton.addEventListener("click", async () => {
             await loadHealth();
             setFeedbackMessage(
                 elements.settingsFeedback,
-                touchesWebui
-                    ? "配置已提交，WebUI 已重新连上。如果你修改了 host 或 port，请改用新的访问地址。"
-                    : "保存请求后 WebUI 已重新连上，请确认刚才的改动是否已经生效。",
+                touchesWebui ? "配置已提交，WebUI 已重新连上。" : "WebUI 已重新连上。",
                 "warn"
             );
         } else {

@@ -756,6 +756,63 @@ button[disabled] {
     border-color: rgba(188, 108, 37, 0.28);
 }
 
+.diary-toolbar {
+    margin-top: 14px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.diary-toolbar-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.diary-selection-meta {
+    margin: 12px 0 0;
+}
+
+#diaryList {
+    max-height: 720px;
+    overflow: auto;
+    padding-right: 4px;
+}
+
+.diary-list-item {
+    display: grid;
+    gap: 10px;
+    padding: 14px;
+    border-radius: 18px;
+    border: 1px solid rgba(97, 77, 64, 0.08);
+    background: rgba(255, 255, 255, 0.72);
+}
+
+.diary-list-item.active {
+    border-color: rgba(188, 108, 37, 0.24);
+    box-shadow: 0 10px 24px rgba(145, 111, 84, 0.08);
+}
+
+.diary-list-item-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+}
+
+.diary-select {
+    flex-shrink: 0;
+}
+
+.diary-open-button {
+    padding: 14px 16px;
+}
+
+.diary-delete-button {
+    padding: 8px 12px;
+}
+
 .list-item-title { margin: 0 0 4px; font-weight: 700; }
 .diary-panel { min-height: 540px; }
 .diary-reading-stage {
@@ -1027,6 +1084,21 @@ button[disabled] {
 }
 
 @media (max-width: 720px) {
+    .diary-toolbar {
+        align-items: stretch;
+    }
+    .diary-toolbar-actions {
+        width: 100%;
+        justify-content: stretch;
+    }
+    .diary-toolbar-actions .ghost-button,
+    .diary-toolbar-actions .danger-button {
+        flex: 1 1 0;
+    }
+    .diary-list-item-top {
+        align-items: stretch;
+        flex-direction: column;
+    }
     .diary-reading-stage {
         margin-top: 14px;
         padding: 8px 0 0;
@@ -1111,6 +1183,36 @@ button[disabled] {
     color: var(--accent-strong);
     font-size: 0.84rem;
     font-weight: 700;
+}
+
+.tag-button {
+    appearance: none;
+    border: none;
+    font: inherit;
+    cursor: pointer;
+    transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.tag-button:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 10px 18px rgba(188, 108, 37, 0.14);
+}
+
+.tag-button:disabled {
+    cursor: wait;
+    opacity: 0.72;
+}
+
+.tag-button--active {
+    background: rgba(66, 138, 90, 0.14);
+    color: #2f6a45;
+}
+
+.tag-action-mark {
+    font-size: 0.76rem;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    opacity: 0.88;
 }
 
 .field { display: grid; gap: 8px; }

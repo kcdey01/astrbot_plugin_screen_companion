@@ -602,3 +602,138 @@ class ScreenCompanionInputStatsMixin:
             "latest_event_at": latest_event_at,
             **presence,
         }
+
+    @staticmethod
+    def _format_input_stats_time_ranges(
+        minute_buckets: dict[str, Any] | None,
+        *,
+        limit: int = 6,
+    ) -> list[str]:
+        if not isinstance(minute_buckets, dict) or not minute_buckets:
+            return []
+
+        minute_keys = sorted(
+            minute_key
+            for minute_key in minute_buckets.keys()
+            if isinstance(minute_key, str) and len(minute_key) == 5 and minute_key[2] == ":"
+        )
+        if not minute_keys:
+            return []
+
+        ranges: list[tuple[int, int]] = []
+        current_start: int | None = None
+        current_end: int | None = None
+
+        for minute_key in minute_keys:
+            hour = int(minute_key[:2])
+            minute = int(minute_key[3:])
+            current_value = hour * 60 + minute
+            if current_start is None:
+                current_start = current_value
+                current_end = current_value
+                continue
+            if current_value <= (current_end or current_value) + 1:
+                current_end = current_value
+                continue
+            ranges.append((current_start, current_end or current_start))
+            current_start = current_value
+            current_end = current_value
+
+        if current_start is not None:
+            ranges.append((current_start, current_end or current_start))
+
+        def format_clock(total_minutes: int) -> str:
+            hour = max(0, min(23, total_minutes // 60))
+            minute = max(0, min(59, total_minutes % 60))
+            return f"{hour:02d}:{minute:02d}"
+
+        labels = []
+        for start_value, end_value in ranges[: max(1, int(limit or 6))]:
+            if start_value == end_value:
+                labels.append(format_clock(start_value))
+            else:
+                labels.append(f"{format_clock(start_value)}-{format_clock(end_value)}")
+        return labels
+
+    def _build_today_input_stats_report(self) -> dict[str, Any]:
+        self._ensure_input_stats_state()
+        payload = self._build_input_stats_payload(days=1)
+        today_key = datetime.now().strftime("%Y-%m-%d")
+        with self._input_stats_lock:
+            raw_entry = copy.deepcopy((getattr(self, "input_stats_daily", {}) or {}).get(today_key, {}))
+        summary = payload.get("today", {}) if isinstance(payload, dict) else {}
+        minute_buckets = raw_entry.get("minute_buckets", {}) if isinstance(raw_entry, dict) else {}
+        active_ranges = self._format_input_stats_time_ranges(minute_buckets, limit=8)
+
+        total_activity = (
+            int(summary.get("total_inputs", 0) or 0)
+            + int(summary.get("moves", 0) or 0)
+        )
+        available = bool(
+            payload.get("enabled")
+            and (
+                total_activity > 0
+                or int(summary.get("move_pixels", 0) or 0) > 0
+                or bool(str(summary.get("last_event_at", "") or "").strip())
+            )
+        )
+
+        return {
+            "enabled": bool(payload.get("enabled")),
+            "available": available,
+            "status": str(payload.get("status", "") or ""),
+            "detail": str(payload.get("detail", "") or ""),
+            "presence_label": str(payload.get("presence_label", "") or ""),
+            "presence_detail": str(payload.get("presence_detail", "") or ""),
+            "idle_label": str(payload.get("idle_label", "") or ""),
+            "latest_event_at": str(payload.get("latest_event_at", "") or ""),
+            "today": summary,
+            "active_ranges": active_ranges,
+            "active_ranges_label": "、".join(active_ranges) if active_ranges else "暂无",
+        }
+
+    def _format_today_input_stats_text(self) -> str:
+        report = self._build_today_input_stats_report()
+        if not report.get("enabled"):
+            detail = str(report.get("detail", "") or "本地输入统计未启用。")
+            return f"今日本地输入统计\n\n{detail}"
+
+        if not report.get("available"):
+            lines = ["今日本地输入统计"]
+            detail = str(report.get("detail", "") or "").strip()
+            presence_detail = str(report.get("presence_detail", "") or "").strip()
+            if detail:
+                lines.append("")
+                lines.append(detail)
+            elif presence_detail:
+                lines.append("")
+                lines.append(presence_detail)
+            else:
+                lines.append("")
+                lines.append("今天还没有采集到有效的键盘或鼠标输入。")
+            return "\n".join(lines)
+
+        today = report.get("today", {}) if isinstance(report.get("today"), dict) else {}
+        lines = [
+            "今日本地输入统计",
+            "",
+            f"- 键盘：{today.get('keys_label', '0 次')}",
+            f"- 点击：{today.get('clicks_label', '0 次')}",
+            f"- 滚轮：{today.get('scroll_steps_label', '0 格')}",
+            f"- 鼠标移动：{today.get('moves_label', '0 段')} / {today.get('move_pixels_label', '0 px')}",
+            f"- 活跃分钟：{today.get('active_minutes_label', '0 分钟')}",
+            f"- 输入总量：{today.get('total_inputs_label', '0 次')}",
+            f"- 高峰时段：{today.get('peak_hour_label', '暂无')}",
+            f"- 活跃区间：{report.get('active_ranges_label', '暂无')}",
+        ]
+
+        latest_event_at = str(today.get("last_event_at", "") or "").strip()
+        if latest_event_at:
+            lines.append(
+                f"- 最近一次输入：{today.get('last_event_time_label', latest_event_at[11:16] if len(latest_event_at) >= 16 else latest_event_at)}"
+            )
+        presence_label = str(report.get("presence_label", "") or "").strip()
+        if presence_label:
+            detail = str(report.get("presence_detail", "") or "").strip()
+            lines.append(f"- 当前在场感：{presence_label}{f'，{detail}' if detail else ''}")
+        return "\n".join(lines)
