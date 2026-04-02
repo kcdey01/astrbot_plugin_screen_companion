@@ -16,7 +16,7 @@ from astrbot.api import logger
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
 
-    APP_VERSION = "2.9.2"
+    APP_VERSION = "2.9.3"
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000
@@ -2862,6 +2862,7 @@ class WebServer:
                     "enable_window_companion",
                     "window_companion_targets",
                     "window_companion_check_interval",
+                    "window_companion_reattach_grace_seconds",
                 ],
             },
             {
@@ -3030,6 +3031,14 @@ class WebServer:
                     "min": 2,
                     "max": 300,
                 },
+                "window_companion_reattach_grace_seconds": {
+                    "description": "窗口重连宽限期",
+                    "type": "int",
+                    "hint": "目标窗口短暂关闭后，最多等待多久再判定为真正结束。适合游戏结算、重开、重新匹配这类会短暂销毁窗口的场景。",
+                    "default": 300,
+                    "min": 10,
+                    "max": 3600,
+                },
                 "enable_input_stats": {
                     "description": "启用本地输入统计",
                     "type": "bool",
@@ -3106,6 +3115,131 @@ class WebServer:
                 },
             }
         )
+
+        def patch_setting_meta(
+            key: str,
+            *,
+            advanced: bool | None = None,
+            condition: dict[str, Any] | None = None,
+        ) -> None:
+            field_meta = schema.get(key)
+            if not isinstance(field_meta, dict):
+                return
+
+            next_meta = dict(field_meta)
+            if advanced is not None:
+                next_meta["advanced"] = bool(advanced)
+            if condition is not None:
+                next_meta["condition"] = dict(condition)
+            schema[key] = next_meta
+
+        advanced_fields = {
+            "system_prompt",
+            "companion_prompt",
+            "start_preset",
+            "end_preset",
+            "start_llm_prompt",
+            "end_llm_prompt",
+            "interaction_frequency",
+            "active_time_range",
+            "rest_time_range",
+            "custom_presets",
+            "current_preset_index",
+            "capture_active_window",
+            "window_companion_check_interval",
+            "ffmpeg_path",
+            "recording_fps",
+            "recording_duration_seconds",
+            "use_shared_screenshot_dir",
+            "shared_screenshot_dir",
+            "bot_vision_quality",
+            "image_quality",
+            "allow_unsafe_video_direct_fallback",
+            "vision_api_url",
+            "vision_api_key",
+            "vision_api_model",
+            "diary_reference_days",
+            "diary_auto_recall",
+            "diary_recall_time",
+            "diary_send_as_image",
+            "diary_generation_prompt",
+            "mic_threshold",
+            "mic_check_interval",
+            "memory_threshold",
+            "battery_threshold",
+            "weather_api_key",
+            "weather_city",
+            "custom_tasks",
+            "debug",
+            "enable_background_activity_tracking",
+            "background_activity_tracking_interval",
+            "input_stats_flush_interval",
+            "away_auto_pause_threshold",
+            "away_long_notice_threshold",
+            "activity_recognition_rules",
+            "webui.host",
+            "webui.port",
+            "webui.auth_enabled",
+            "webui.password",
+            "webui.session_timeout",
+            "webui.allow_external_api",
+        }
+        for field_key in advanced_fields:
+            patch_setting_meta(field_key, advanced=True)
+
+        conditional_fields = {
+            "start_preset": {"use_llm_for_start_end": False},
+            "end_preset": {"use_llm_for_start_end": False},
+            "start_llm_prompt": {"use_llm_for_start_end": True},
+            "end_llm_prompt": {"use_llm_for_start_end": True},
+            "window_companion_targets": {"enable_window_companion": True},
+            "window_companion_check_interval": {"enable_window_companion": True},
+            "window_companion_reattach_grace_seconds": {"enable_window_companion": True},
+            "ffmpeg_path": {"screen_recognition_mode": True},
+            "recording_fps": {"screen_recognition_mode": True},
+            "recording_duration_seconds": {"screen_recognition_mode": True},
+            "shared_screenshot_dir": {"use_shared_screenshot_dir": True},
+            "allow_unsafe_video_direct_fallback": {"use_external_vision": True},
+            "vision_api_url": {"use_external_vision": True},
+            "vision_api_key": {"use_external_vision": True},
+            "vision_api_model": {"use_external_vision": True},
+            "diary_time": {"enable_diary": True},
+            "diary_reference_days": {"enable_diary": True},
+            "diary_auto_recall": {"enable_diary": True},
+            "diary_recall_time": {
+                "enable_diary": True,
+                "diary_auto_recall": True,
+            },
+            "diary_send_as_image": {"enable_diary": True},
+            "diary_generation_prompt": {"enable_diary": True},
+            "mic_threshold": {"enable_mic_monitor": True},
+            "mic_check_interval": {"enable_mic_monitor": True},
+            "background_activity_tracking_interval": {
+                "enable_background_activity_tracking": True,
+            },
+            "input_stats_flush_interval": {"enable_input_stats": True},
+            "enable_away_auto_pause": {"enable_input_stats": True},
+            "away_auto_pause_threshold": {
+                "enable_input_stats": True,
+                "enable_away_auto_pause": True,
+            },
+            "away_long_notice_threshold": {
+                "enable_input_stats": True,
+                "enable_away_auto_pause": True,
+            },
+            "webui.host": {"webui.enabled": True},
+            "webui.port": {"webui.enabled": True},
+            "webui.auth_enabled": {"webui.enabled": True},
+            "webui.password": {
+                "webui.enabled": True,
+                "webui.auth_enabled": True,
+            },
+            "webui.session_timeout": {"webui.enabled": True},
+            "webui.allow_external_api": {"webui.enabled": True},
+        }
+        for field_key, condition in conditional_fields.items():
+            patch_setting_meta(field_key, condition=condition)
+
         values.update(
             {
                 "enable_window_companion": bool(
@@ -3117,6 +3251,10 @@ class WebServer:
                 or "",
                 "window_companion_check_interval": int(
                     getattr(self.plugin, "window_companion_check_interval", 5) or 5
+                ),
+                "window_companion_reattach_grace_seconds": int(
+                    getattr(self.plugin, "window_companion_reattach_grace_seconds", 300)
+                    or 300
                 ),
                 "enable_input_stats": bool(
                     getattr(self.plugin, "enable_input_stats", False)
@@ -3374,6 +3512,9 @@ class WebServer:
             "enable_window_companion": self._plugin_bool("enable_window_companion"),
             "window_companion_targets": getattr(self.plugin, "window_companion_targets", "") or "",
             "window_companion_check_interval": int(getattr(self.plugin, "window_companion_check_interval", 5) or 5),
+            "window_companion_reattach_grace_seconds": int(
+                getattr(self.plugin, "window_companion_reattach_grace_seconds", 300) or 300
+            ),
             "window_companion_active_title": getattr(self.plugin, "window_companion_active_title", "") or "",
             "diary_time": getattr(self.plugin, "diary_time", ""),
             "observation_count": len(getattr(self.plugin, "observations", []) or []),

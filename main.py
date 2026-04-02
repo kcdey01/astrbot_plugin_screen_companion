@@ -77,6 +77,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
     REST_CUE_REPLY_COOLDOWN_SECONDS = 90 * 60
     CUSTOM_TASK_PROCESS_DEDUP_SECONDS = 90
     BACKGROUND_SCREEN_GUARD_STALE_SECONDS = 5 * 60
+    WINDOW_COMPANION_REATTACH_GRACE_SECONDS = 300
     SCREEN_ANALYSIS_FAILURE_BACKOFF_BASE_SECONDS = 30
     SCREEN_ANALYSIS_FAILURE_BACKOFF_MAX_SECONDS = 5 * 60
     SCREEN_TRACE_LIMIT = 40
@@ -498,6 +499,17 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.window_companion_targets = self.plugin_config.window_companion_targets
         self.window_companion_check_interval = (
             self.plugin_config.window_companion_check_interval
+        )
+        self.window_companion_reattach_grace_seconds = max(
+            10,
+            int(
+                getattr(
+                    self.plugin_config,
+                    "window_companion_reattach_grace_seconds",
+                    self.WINDOW_COMPANION_REATTACH_GRACE_SECONDS,
+                )
+                or self.WINDOW_COMPANION_REATTACH_GRACE_SECONDS
+            ),
         )
         self.use_shared_screenshot_dir = self._coerce_bool(self.plugin_config.use_shared_screenshot_dir)
         self.shared_screenshot_dir = self.plugin_config.shared_screenshot_dir

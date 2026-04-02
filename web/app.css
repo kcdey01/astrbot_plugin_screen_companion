@@ -511,6 +511,16 @@ button[disabled] {
     min-width: min(320px, 100%);
 }
 
+.settings-mode-toggle {
+    white-space: nowrap;
+}
+
+.settings-mode-toggle.active {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 234, 219, 0.94));
+    border-color: rgba(188, 108, 37, 0.26);
+    color: #8d4a18;
+}
+
 .settings-form {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }

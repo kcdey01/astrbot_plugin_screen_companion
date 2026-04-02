@@ -208,6 +208,8 @@ class ScreenCompanionRuntimeMixin:
             self.window_companion_active_target = ""
         if not hasattr(self, "window_companion_active_rule") or self.window_companion_active_rule is None:
             self.window_companion_active_rule = {}
+        if not hasattr(self, "window_companion_missing_since"):
+            self.window_companion_missing_since = 0.0
         if not hasattr(self, "last_rest_reminder_time"):
             self.last_rest_reminder_time = None
         if not hasattr(self, "last_rest_reminder_day"):

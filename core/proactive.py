@@ -633,6 +633,16 @@ class ScreenCompanionProactiveMixin:
         )
         return bool(task and not task.done())
 
+    def _window_companion_rule_key(self, rule: dict | None) -> str:
+        if not isinstance(rule, dict):
+            return ""
+        return str(rule.get("keyword_lower", "") or "").strip()
+
+    def _window_companion_rules_match(self, left: dict | None, right: dict | None) -> bool:
+        left_key = self._window_companion_rule_key(left)
+        right_key = self._window_companion_rule_key(right)
+        return bool(left_key and right_key and left_key == right_key)
+
     async def _start_window_companion_session(self, window_title: str, rule: dict) -> bool:
         """Start automatic companion mode for a matched window."""
         self._ensure_runtime_state()
@@ -655,6 +665,7 @@ class ScreenCompanionProactiveMixin:
         self.window_companion_active_title = window_title
         self.window_companion_active_target = target
         self.window_companion_active_rule = dict(rule or {})
+        self.window_companion_missing_since = 0.0
         self.is_running = True
         self.state = "active"
         self.auto_tasks[self.WINDOW_COMPANION_TASK_ID] = asyncio.create_task(
@@ -699,6 +710,7 @@ class ScreenCompanionProactiveMixin:
         self.window_companion_active_title = ""
         self.window_companion_active_target = ""
         self.window_companion_active_rule = {}
+        self.window_companion_missing_since = 0.0
 
         if not self.auto_tasks:
             self.is_running = False
@@ -720,6 +732,17 @@ class ScreenCompanionProactiveMixin:
         self._ensure_runtime_state()
         while self.running and self._is_current_process_instance():
             interval = max(2, int(getattr(self, "window_companion_check_interval", 5) or 5))
+            grace_seconds = max(
+                interval * 2,
+                int(
+                    getattr(
+                        self,
+                        "window_companion_reattach_grace_seconds",
+                        getattr(self, "WINDOW_COMPANION_REATTACH_GRACE_SECONDS", 300),
+                    )
+                    or getattr(self, "WINDOW_COMPANION_REATTACH_GRACE_SECONDS", 300)
+                ),
+            )
             try:
                 if not self.enable_window_companion or not getattr(
                     self, "parsed_window_companion_targets", None
@@ -733,16 +756,42 @@ class ScreenCompanionProactiveMixin:
 
                 window_titles = self._list_open_window_titles()
                 matched_rule, matched_title = self._match_window_companion_target(window_titles)
+                active_session = self._is_window_companion_session_active()
                 active_title = str(getattr(self, "window_companion_active_title", "") or "").strip()
+                active_rule = getattr(self, "window_companion_active_rule", {}) or {}
                 active_exists = bool(
                     active_title
                     and any(active_title.casefold() == title.casefold() for title in window_titles)
                 )
+                matched_same_rule = bool(
+                    matched_rule
+                    and matched_title
+                    and self._window_companion_rules_match(active_rule, matched_rule)
+                )
 
-                if matched_rule and matched_title and not self._is_window_companion_session_active():
+                if matched_rule and matched_title and not active_session:
                     await self._start_window_companion_session(matched_title, matched_rule)
-                elif self._is_window_companion_session_active() and not active_exists:
-                    await self._stop_window_companion_session(reason="window_closed")
+                elif active_session:
+                    if active_exists or matched_same_rule:
+                        if matched_same_rule and active_title.casefold() != matched_title.casefold():
+                            logger.info(
+                                f"Window companion resumed on recreated window: {active_title or 'unknown'} -> {matched_title}"
+                            )
+                            self.window_companion_active_title = matched_title
+                            self.window_companion_active_rule = dict(matched_rule or {})
+                        self.window_companion_missing_since = 0.0
+                    else:
+                        missing_since = float(
+                            getattr(self, "window_companion_missing_since", 0.0) or 0.0
+                        )
+                        now_ts = time.time()
+                        if missing_since <= 0:
+                            self.window_companion_missing_since = now_ts
+                            logger.info(
+                                "Window companion target disappeared briefly, waiting before sending an end reminder"
+                            )
+                        elif (now_ts - missing_since) >= grace_seconds:
+                            await self._stop_window_companion_session(reason="window_closed")
             except asyncio.CancelledError:
                 raise
             except Exception as e:

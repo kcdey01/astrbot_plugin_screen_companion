@@ -97,6 +97,7 @@ class PluginConfig(BaseModel):
     enable_window_companion: bool = False
     window_companion_targets: str = ""
     window_companion_check_interval: int = 5
+    window_companion_reattach_grace_seconds: int = 300
     use_shared_screenshot_dir: bool = False
     shared_screenshot_dir: str = ""
     custom_tasks: str = ""
@@ -264,6 +265,15 @@ class PluginConfig(BaseModel):
     def validate_window_companion_check_interval(cls, v):
         if v < 1:
             raise ValueError('window_companion_check_interval 不能小于 1 秒')
+        return v
+
+    @field_validator('window_companion_reattach_grace_seconds')
+    @classmethod
+    def validate_window_companion_reattach_grace_seconds(cls, v):
+        if v < 10:
+            raise ValueError("window_companion_reattach_grace_seconds must be at least 10 seconds")
+        if v > 3600:
+            raise ValueError("window_companion_reattach_grace_seconds must be at most 3600 seconds")
         return v
 
     @field_validator('max_observations')

@@ -23,6 +23,7 @@ const state = {
     settingsGroups: [],
     activeSettingsGroup: "persona",
     settingsSearch: "",
+    settingsShowAdvanced: false,
     windowCandidates: [],
     activityStats: null,
     activityFilters: {
@@ -122,6 +123,7 @@ const elements = {
     settingsGroupTitle: document.getElementById("settingsGroupTitle"),
     settingsGroupDescription: document.getElementById("settingsGroupDescription"),
     settingsHelper: document.getElementById("settingsHelper"),
+    settingsModeToggle: document.getElementById("settingsModeToggle"),
     settingsSearchInput: document.getElementById("settingsSearchInput"),
     settingsForm: document.getElementById("settingsForm"),
     settingsFeedback: document.getElementById("settingsFeedback"),
@@ -861,6 +863,33 @@ function getSettingMeta(key) {
     return state.settingsSchema[key] || {};
 }
 
+function loadSettingsModePreference() {
+    try {
+        return window.localStorage.getItem("screenCompanion.settings.showAdvanced") === "true";
+    } catch (error) {
+        return false;
+    }
+}
+
+function persistSettingsModePreference() {
+    try {
+        window.localStorage.setItem(
+            "screenCompanion.settings.showAdvanced",
+            state.settingsShowAdvanced ? "true" : "false"
+        );
+    } catch (error) {
+        // ignore storage failures
+    }
+}
+
+function renderSettingsModeToggle() {
+    if (!elements.settingsModeToggle) return;
+    elements.settingsModeToggle.textContent = state.settingsShowAdvanced
+        ? "切回基础设置"
+        : "显示高级设置";
+    elements.settingsModeToggle.classList.toggle("active", state.settingsShowAdvanced);
+}
+
 function areSettingValuesEqual(left, right) {
     return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
@@ -895,6 +924,83 @@ function setSettingsValues(updates) {
     renderSettingsForm();
 }
 
+function getSettingsTemplatePresets() {
+    return [
+        {
+            id: "game",
+            label: "游戏陪伴",
+            description: "更适合游戏、排队、结算、重开这类节奏快又会短暂切窗的场景。",
+            preferredGroup: "runtime",
+            updates: {
+                enabled: true,
+                use_companion_mode: true,
+                check_interval: 180,
+                trigger_probability: 45,
+                screen_recognition_mode: true,
+                enable_window_companion: true,
+                window_companion_check_interval: 5,
+                window_companion_reattach_grace_seconds: 300,
+            },
+        },
+        {
+            id: "work",
+            label: "工作陪伴",
+            description: "更偏向稳定观察和轻提醒，适合 IDE、文档、浏览器、多窗口工作流。",
+            preferredGroup: "runtime",
+            updates: {
+                enabled: true,
+                use_companion_mode: true,
+                check_interval: 300,
+                trigger_probability: 25,
+                capture_active_window: true,
+                screen_recognition_mode: false,
+                enable_window_companion: false,
+                enable_input_stats: true,
+                enable_background_activity_tracking: true,
+                enable_away_auto_pause: true,
+            },
+        },
+        {
+            id: "quiet",
+            label: "低打扰",
+            description: "尽量少打断你，只有比较值得说的时候才会出声。",
+            preferredGroup: "runtime",
+            updates: {
+                enabled: true,
+                use_companion_mode: true,
+                check_interval: 480,
+                trigger_probability: 12,
+                enable_window_companion: false,
+                enable_natural_language_screen_assist: false,
+                enable_background_activity_tracking: false,
+                enable_input_stats: false,
+            },
+        },
+        {
+            id: "journal",
+            label: "轻量记录",
+            description: "更偏向记录和回顾，减少主动打扰，保留日记和轻量轨迹。",
+            preferredGroup: "diary",
+            updates: {
+                enabled: true,
+                use_companion_mode: false,
+                check_interval: 900,
+                trigger_probability: 5,
+                enable_window_companion: false,
+                enable_diary: true,
+                enable_learning: true,
+                enable_background_activity_tracking: true,
+                enable_input_stats: true,
+                enable_away_auto_pause: false,
+            },
+        },
+    ];
+}
+
+function findSettingsTemplatePreset(presetId) {
+    return getSettingsTemplatePresets().find((item) => item.id === presetId) || null;
+}
+
 function applySettingsPayload(settings) {
     const nextSettings = settings || {};
     state.settingsSchema = nextSettings.schema || state.settingsSchema;
@@ -906,6 +1012,7 @@ function applySettingsPayload(settings) {
         state.activeSettingsGroup = state.settingsGroups[0]?.id || "";
     }
 
+    renderSettingsModeToggle();
     renderSettingsGroups();
     renderSettingsForm();
 }
@@ -1038,30 +1145,43 @@ function openSettingsGroup(groupId) {
     switchSettingsGroup(groupId);
 }
 
-function getVisibleSettingsGroups() {
-    const query = state.settingsSearch.trim().toLowerCase();
-    if (!query) return state.settingsGroups;
-
-    return state.settingsGroups
-        .map((group) => {
-            const fields = (group.fields || []).filter((fieldKey) => {
-                const meta = getSettingMeta(fieldKey);
-                const haystacks = [
-                    fieldKey,
-                    meta.description || "",
-                    meta.hint || "",
-                ];
-                return haystacks.some((item) => String(item).toLowerCase().includes(query));
-            });
-            return { ...group, fields };
-        })
-        .filter((group) => group.fields.length > 0);
-}
-
 function shouldShowSettingField(fieldKey, currentValues) {
     const meta = getSettingMeta(fieldKey);
+    if (meta.advanced && !state.settingsShowAdvanced) {
+        return false;
+    }
     const condition = meta.condition || {};
     return Object.entries(condition).every(([key, expected]) => currentValues[key] === expected);
+}
+
+function getVisibleFieldsForGroup(group, currentValues, query = "") {
+    const normalizedQuery = String(query || "").trim().toLowerCase();
+    return (group?.fields || []).filter((fieldKey) => {
+        if (!shouldShowSettingField(fieldKey, currentValues)) {
+            return false;
+        }
+        if (!normalizedQuery) {
+            return true;
+        }
+        const meta = getSettingMeta(fieldKey);
+        const haystacks = [
+            fieldKey,
+            meta.description || "",
+            meta.hint || "",
+        ];
+        return haystacks.some((item) => String(item).toLowerCase().includes(normalizedQuery));
+    });
+}
+
+function getVisibleSettingsGroups() {
+    const currentValues = { ...state.settingsValues };
+    const query = state.settingsSearch.trim().toLowerCase();
+    return state.settingsGroups
+        .map((group) => ({
+            ...group,
+            fields: getVisibleFieldsForGroup(group, currentValues, query),
+        }))
+        .filter((group) => group.fields.length > 0);
 }
 
 function createSettingsInput(fieldKey, meta, value) {
@@ -1403,6 +1523,18 @@ function renderSettingsHelper(activeGroup, currentValues) {
     if (!activeGroup) return;
 
     const cards = [];
+    const templatePresets = getSettingsTemplatePresets();
+
+    if (["persona", "runtime", "diary"].includes(activeGroup.id)) {
+        cards.push({
+            title: "常用场景模板",
+            body: "这些模板只会改动陪伴节奏、识屏方式、记录强度这类常用开关，不会覆盖你已经填好的窗口目标、API Key、提示词和密码。",
+            actions: templatePresets.map((preset) => ({
+                label: preset.label,
+                action: `apply-template::${preset.id}`,
+            })),
+        });
+    }
 
     if (activeGroup.id === "vision") {
         cards.push({
@@ -1516,6 +1648,11 @@ function renderSettingsGroups() {
     elements.settingsSummary.textContent = visibleGroups.length
         ? `当前可见 ${visibleGroups.length} 个配置分组，待保存 ${dirtyCount} 项。`
         : "没有匹配到配置项。";
+
+    const modeLabel = state.settingsShowAdvanced ? "高级模式" : "基础模式";
+    elements.settingsSummary.textContent = visibleGroups.length
+        ? `${modeLabel} · 当前可见 ${visibleGroups.length} 个配置分组，待保存 ${dirtyCount} 项。`
+        : `${modeLabel} · 没有匹配到配置项。`;
 
     if (!visibleGroups.length) {
         elements.settingsGroupList.appendChild(cloneEmptyState());
@@ -3011,6 +3148,22 @@ async function handleSettingsActionClick(event) {
     const action = event.target.closest("[data-settings-action]")?.dataset.settingsAction;
     if (!action) return;
 
+    if (action.startsWith("apply-template::")) {
+        const presetId = action.split("::")[1] || "";
+        const preset = findSettingsTemplatePreset(presetId);
+        if (!preset) return;
+        if (preset.preferredGroup) {
+            openSettingsGroup(preset.preferredGroup);
+        }
+        setSettingsValues(preset.updates || {});
+        setFeedbackMessage(
+            elements.settingsFeedback,
+            `已套用“${preset.label}”模板。确认没问题后再点保存配置。`,
+            "warn"
+        );
+        return;
+    }
+
     if (action === "open-vision-group") {
         openSettingsGroup("vision");
         return;
@@ -3136,6 +3289,16 @@ if (elements.settingsSearchInput) {
     });
 }
 
+if (elements.settingsModeToggle) {
+    elements.settingsModeToggle.addEventListener("click", () => {
+        state.settingsShowAdvanced = !state.settingsShowAdvanced;
+        persistSettingsModePreference();
+        renderSettingsModeToggle();
+        renderSettingsGroups();
+        renderSettingsForm();
+    });
+}
+
 elements.resetSettingsButton.addEventListener("click", () => {
     const visibleGroups = getVisibleSettingsGroups();
     const activeGroup = visibleGroups.find((group) => group.id === state.activeSettingsGroup);
@@ -3227,6 +3390,8 @@ elements.logoutButton.addEventListener("click", async () => {
 });
 
 window.addEventListener("DOMContentLoaded", async () => {
+    state.settingsShowAdvanced = loadSettingsModePreference();
+    renderSettingsModeToggle();
     const hash = window.location.hash.replace("#", "");
     if (["runtime", "settings", "diaries", "observations", "memories", "activity"].includes(hash)) {
         switchSection(hash);
