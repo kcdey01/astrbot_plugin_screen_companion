@@ -131,9 +131,14 @@ class ScreenCompanionProactiveMixin:
         if target:
             return self._normalize_target(target)
 
-        admin_qq = str(getattr(self, "admin_qq", "") or "").strip()
-        if admin_qq:
-            return self._build_private_target(admin_qq)
+        get_primary_admin_id = getattr(self, "_get_primary_admin_id", None)
+        if callable(get_primary_admin_id):
+            admin_id = str(get_primary_admin_id() or "").strip()
+        else:
+            admin_id = str(getattr(self, "admin_qq", "") or "").strip()
+
+        if admin_id:
+            return self._build_private_target(admin_id)
         return ""
 
     def _get_available_platforms(self) -> list[Any]:

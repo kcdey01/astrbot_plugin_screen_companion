@@ -1,5 +1,7 @@
 import asyncio
 import datetime
+import functools
+import inspect
 import os
 import shutil
 import time
@@ -12,7 +14,6 @@ DEFAULT_SYSTEM_PROMPT = """
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.event.filter import PermissionType, permission_type
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star
 
@@ -23,6 +24,35 @@ from .core.memory import ScreenCompanionMemoryMixin
 from .core.media import ScreenCompanionMediaMixin
 from .core.input_stats import ScreenCompanionInputStatsMixin
 from .core.command_support import ScreenCompanionCommandSupportMixin
+
+
+def admin_required(func):
+    if inspect.isasyncgenfunction(func):
+        @functools.wraps(func)
+        async def asyncgen_wrapper(self, event: AstrMessageEvent, *args, **kwargs):
+            if not await self._ensure_admin_permission(event):
+                return
+            async for item in func(self, event, *args, **kwargs):
+                yield item
+
+        return asyncgen_wrapper
+
+    if inspect.iscoroutinefunction(func):
+        @functools.wraps(func)
+        async def async_wrapper(self, event: AstrMessageEvent, *args, **kwargs):
+            if not await self._ensure_admin_permission(event):
+                return
+            return await func(self, event, *args, **kwargs)
+
+        return async_wrapper
+
+    @functools.wraps(func)
+    def sync_wrapper(self, event: AstrMessageEvent, *args, **kwargs):
+        if not self._has_admin_permission(event):
+            return None
+        return func(self, event, *args, **kwargs)
+
+    return sync_wrapper
 
 class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin, ScreenCompanionMemoryMixin, ScreenCompanionInputStatsMixin, ScreenCompanionMediaMixin, ScreenCompanionCommandSupportMixin, Star):
     LEGACY_DEFAULT_CUSTOM_TASK = "02:00 根据用户行为催促其尽快休息"
@@ -242,6 +272,106 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
     def _get_runtime_flag(self, name: str, default: bool = False) -> bool:
         return self._coerce_bool(getattr(self, name, default))
+
+    def _get_configured_admin_ids(self) -> set[str]:
+        admin_ids: set[str] = set()
+
+        admin_qq = str(getattr(self, "admin_qq", "") or "").strip()
+        if admin_qq:
+            admin_ids.add(admin_qq)
+
+        config_obj = getattr(getattr(self, "context", None), "astrbot_config", None)
+        if isinstance(config_obj, dict):
+            admins_raw = config_obj.get("admins_id", [])
+            if isinstance(admins_raw, str):
+                candidates = admins_raw.split(",")
+            elif isinstance(admins_raw, (list, tuple, set)):
+                candidates = admins_raw
+            else:
+                candidates = []
+            for item in candidates:
+                normalized = str(item or "").strip()
+                if normalized:
+                    admin_ids.add(normalized)
+
+        return admin_ids
+
+    def _get_primary_admin_id(self) -> str:
+        admin_ids = self._get_configured_admin_ids()
+        if not admin_ids:
+            return ""
+
+        admin_qq = str(getattr(self, "admin_qq", "") or "").strip()
+        if admin_qq and admin_qq in admin_ids:
+            return admin_qq
+
+        return sorted(admin_ids)[0]
+
+    def _get_event_sender_id(self, event: AstrMessageEvent) -> str:
+        getter = getattr(event, "get_sender_id", None)
+        if callable(getter):
+            try:
+                sender_id = str(getter() or "").strip()
+                if sender_id:
+                    return sender_id
+            except Exception:
+                pass
+
+        for attr in ("sender_id", "user_id", "qq", "author_id"):
+            value = str(getattr(event, attr, "") or "").strip()
+            if value:
+                return value
+
+        return ""
+
+    def _is_group_message_event(self, event: AstrMessageEvent) -> bool:
+        getter = getattr(event, "get_group_id", None)
+        if callable(getter):
+            try:
+                if str(getter() or "").strip():
+                    return True
+            except Exception:
+                pass
+
+        unified_msg_origin = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        return ":GroupMessage:" in unified_msg_origin
+
+    def _has_admin_permission(self, event: AstrMessageEvent) -> bool:
+        is_admin = getattr(event, "is_admin", None)
+        if callable(is_admin):
+            try:
+                if is_admin():
+                    return True
+            except Exception:
+                pass
+
+        sender_id = self._get_event_sender_id(event)
+        if not sender_id:
+            return False
+
+        return sender_id in self._get_configured_admin_ids()
+
+    async def _ensure_admin_permission(
+        self,
+        event: AstrMessageEvent,
+        *,
+        reply_on_denied: bool = True,
+        message: str = "权限不足：仅管理员可使用该功能。",
+    ) -> bool:
+        if self._has_admin_permission(event):
+            return True
+
+        if reply_on_denied:
+            try:
+                await event.send(event.plain_result(message))
+            except Exception as e:
+                logger.debug(f"发送权限不足提示失败: {e}")
+
+        try:
+            event.stop_event()
+        except Exception:
+            pass
+        return False
 
     def _sync_all_config(self) -> None:
         """将配置对象同步到插件运行时字段。"""
@@ -889,7 +1019,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
 
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @filter.command("kp")
     async def kp(self, event: AstrMessageEvent):
         """立即执行一次截图分析。"""
@@ -940,7 +1070,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             logger.error(traceback.format_exc())
             yield event.plain_result("这次处理失败了，我先缓一口气，你可以再试一次。")
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @filter.command("kpr")
     async def kpr(self, event: AstrMessageEvent):
         """\u7acb\u5373\u6267\u884c\u4e00\u6b21\u5f55\u5c4f\u5206\u6790\u3002"""
@@ -1029,6 +1159,15 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             return
 
         try:
+            if not await self._ensure_admin_permission(event, reply_on_denied=False):
+                if self.debug:
+                    sender_id = self._get_event_sender_id(event) or "<unknown>"
+                    scope = "群聊" if self._is_group_message_event(event) else "私聊"
+                    logger.info(
+                        f"自然语言识屏求助被拒绝：{scope} 发送者 {sender_id} 没有权限"
+                    )
+                return
+
             message_text = str(getattr(event, "message_str", "") or "").strip()
             if not message_text or message_text.startswith("/"):
                 return
@@ -1044,6 +1183,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 if self.debug:
                     logger.info("自然语言识屏求助命中过冷却时间，跳过触发")
                 return
+            self._screen_assist_cooldowns[cooldown_key] = now_ts
 
             ok, err_msg = self._check_env()
             if not ok:
@@ -1057,7 +1197,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             screen_result = await self._run_screen_assist(
                 event,
                 task_id="nl_screen_assist",
-                custom_prompt=custom_prompt,
+                custom_prompt=f"{custom_prompt}\n用户的原始请求：{request_prompt}",
                 history_user_text=message_text,
             )
             if not screen_result:
@@ -1078,7 +1218,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         except Exception as e:
             logger.error(f"自然语言识屏助手失败: {e}")
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @filter.command("kps")
     async def kps(self, event: AstrMessageEvent):
         """切换自动观察运行状态。"""
@@ -1142,7 +1282,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         """管理自动观察屏幕任务。"""
         pass
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("ys")
     async def kpi_ys(self, event: AstrMessageEvent, preset_index: int = None):
         """切换预设。"""
@@ -1173,7 +1313,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             f"已切换到预设 {preset_index}: {preset['name']}，间隔 {preset['check_interval']} 秒，触发概率 {preset['trigger_probability']}%"
         )
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("start")
     async def kpi_start(self, event: AstrMessageEvent):
         self._ensure_runtime_state()
@@ -1202,7 +1342,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         start_response = await self._get_start_response(event.unified_msg_origin)
         yield event.plain_result(f"已启动自动观察任务 {self.AUTO_TASK_ID}。\n{start_response}")
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("stop")
     async def kpi_stop(self, event: AstrMessageEvent, task_id: str = None):
         """停止自动观察任务。"""
@@ -1248,20 +1388,20 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
 
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("status")
     async def kpi_status(self, event: AstrMessageEvent):
         """输出当前运行状态和关键诊断信息。"""
         async for result in self._render_status_report(event):
             yield result
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("help")
     async def kpi_help(self, event: AstrMessageEvent):
         """查看常用命令帮助。"""
         yield event.plain_result(self._build_kpi_help_text())
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("list")
     async def kpi_list(self, event: AstrMessageEvent):
         """列出当前运行中的自动观察任务。"""
@@ -1277,7 +1417,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 msg += f"- {task_id}\n"
             yield event.plain_result(msg)
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("ffmpeg")
     async def kpi_ffmpeg(self, event: AstrMessageEvent, ffmpeg_path: str = None):
         """设置 ffmpeg 路径并自动复制到插件数据目录。"""
@@ -1316,7 +1456,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         except Exception as e:
             yield event.plain_result(f"复制失败：{str(e)}")
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("y")
     async def kpi_y(self, event: AstrMessageEvent, preset_index: int = None, interval: int = None, probability: int = None):
         """新增或修改自定义预设。"""
@@ -1363,14 +1503,14 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         )
 
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("p")
     async def kpi_p(self, event: AstrMessageEvent):
         """列出全部自定义预设。"""
         async for result in self._render_preset_list(event):
             yield result
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("add")
     async def kpi_add(self, event: AstrMessageEvent, interval: int, *prompt):
         """新增一个自定义观察任务。"""
@@ -1401,7 +1541,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         except ValueError:
             yield event.plain_result("用法: /kpi add [间隔秒数] [自定义提示词]")
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("d")
     async def kpi_d(self, event: AstrMessageEvent, date: str = None):
         """查看指定日期的日记。"""
@@ -1409,7 +1549,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             yield result
 
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("jk")
     async def kpi_jk(self, event: AstrMessageEvent):
         """查看今日本地输入统计。"""
@@ -1465,7 +1605,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             logger.error(f"生成输入统计二次加工回复失败: {e}")
             yield event.plain_result(report_text)
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("correct")
     async def kpi_correct(self, event: AstrMessageEvent, *args):
         """纠正 Bot 的回复。"""
@@ -1484,7 +1624,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         else:
             yield event.plain_result("当前手动纠正学习已关闭，这次没有写入学习记录。")
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("preference")
     async def kpi_preference(self, event: AstrMessageEvent, category: str, *preference):
         """添加用户偏好。"""
@@ -1507,7 +1647,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         
         yield event.plain_result(f"已添加偏好: {category} - {preference_content}")
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("learning")
     async def kpi_learning(self, event: AstrMessageEvent, target: str = "", state: str = ""):
         """查看或切换学习相关开关。"""
@@ -1548,7 +1688,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             f"{message}\n{self._format_learning_switch_report()}\n\n{self._format_learning_activity_report()}"
         )
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("learned")
     async def kpi_learned(self, event: AstrMessageEvent, limit: int = 5):
         """查看最近自动学到的自然反馈。"""
@@ -1576,7 +1716,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         lines.append("可用 /kpi unlearn [序号] 删除，或 /kpi unlearn all 清空自动学习记录。")
         yield event.plain_result("\n".join(lines))
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("unlearn")
     async def kpi_unlearn(self, event: AstrMessageEvent, target: str = ""):
         """删除自动学习到的自然反馈。"""
@@ -1612,7 +1752,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         summary = str(target_record.get("preference_hint", "") or target_record.get("corrected", "") or "").strip()
         yield event.plain_result(f"已删除第 {index} 条自动学习记录：{summary or '已移除'}")
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("recent")
     async def kpi_recent(self, event: AstrMessageEvent, days: int = 3):
         """查看最近几天的日记。"""
@@ -1721,7 +1861,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         blame_task = asyncio.create_task(generate_blame())
         self.background_tasks.append(blame_task)
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("debug")
     async def kpi_debug(self, event: AstrMessageEvent, status: str = None):
         """切换调试模式 /kpi debug [on/off]"""
@@ -1741,7 +1881,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         else:
             yield event.plain_result("用法: /kpi debug [on/off]")
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("webui")
     async def kpi_webui(self, event: AstrMessageEvent, action: str = ""):
         """查看或控制 WebUI /kpi webui [start/stop]"""
@@ -1766,7 +1906,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         else:
             yield event.plain_result("无效操作，请使用 /kpi webui start 或 /kpi webui stop")
 
-    @permission_type(PermissionType.ADMIN)
+    @admin_required
     @kpi_group.command("cd")
     async def kpi_cd(self, event: AstrMessageEvent, date: str = None):
         """补写日记 /kpi cd [YYYYMMDD]"""

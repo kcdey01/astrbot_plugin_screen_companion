@@ -16,7 +16,7 @@ from astrbot.api import logger
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
 
-    APP_VERSION = "2.9.1"
+    APP_VERSION = "2.9.2"
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000
@@ -2829,7 +2829,7 @@ class WebServer:
             {
                 "id": "persona",
                 "title": "人格与对话",
-                "description": "配置 Bot 的称呼、系统提示词和陪伴式对话风格。",
+                "description": "先决定 Bot 是谁、怎么说话，以及用户主动求助时它该不该介入识屏。",
                 "fields": [
                     "bot_name",
                     "system_prompt",
@@ -2846,7 +2846,7 @@ class WebServer:
             {
                 "id": "runtime",
                 "title": "运行节奏",
-                "description": "调整自动识屏频率、预设、截图模式和窗口陪伴规则。",
+                "description": "决定多久看一次、怎么触发、用截图还是录屏，以及是否按窗口自动开陪伴。",
                 "fields": [
                     "enabled",
                     "interaction_mode",
@@ -2867,7 +2867,7 @@ class WebServer:
             {
                 "id": "vision",
                 "title": "识屏与视觉",
-                "description": "控制截图来源、视觉模型和识屏提示词。",
+                "description": "配置识屏素材从哪里来、先走哪条视觉链路，以及模型该重点看什么。",
                 "fields": [
                     "screen_recognition_mode",
                     "ffmpeg_path",
@@ -2889,7 +2889,7 @@ class WebServer:
             {
                 "id": "diary",
                 "title": "日记与记忆",
-                "description": "设置日记生成、回顾提醒和长期记忆保留策略。",
+                "description": "管理日记生成、自动撤回、长期学习和陪伴式记忆的保留方式。",
                 "fields": [
                     "enable_diary",
                     "diary_time",
@@ -2905,7 +2905,7 @@ class WebServer:
             {
                 "id": "sensing",
                 "title": "环境感知",
-                "description": "管理麦克风、天气、主动消息目标和自定义监控任务。",
+                "description": "放麦克风、天气、电量内存提醒、主动消息目标和定时提示这类环境感知能力。",
                 "fields": [
                     "enable_mic_monitor",
                     "mic_threshold",
@@ -2923,7 +2923,7 @@ class WebServer:
             {
                 "id": "analytics",
                 "title": "本地统计",
-                "description": "把活动回顾、工作轨迹、输入空闲状态和轻量隐私保护放到同一套体验里。",
+                "description": "管理键鼠输入统计、活动轨迹、离开自动挂起和活动页隐私保护。",
                 "fields": [
                     "enable_background_activity_tracking",
                     "background_activity_tracking_interval",
@@ -2939,7 +2939,7 @@ class WebServer:
             {
                 "id": "webui",
                 "title": "WebUI",
-                "description": "配置 WebUI 的访问地址、密码和外部 API 权限。",
+                "description": "配置 WebUI 的访问地址、登录保护、会话时长，以及是否对外开放分析接口。",
                 "fields": [
                     "webui.enabled",
                     "webui.host",
@@ -2956,19 +2956,19 @@ class WebServer:
             "webui.enabled": {
                 "description": "启用 WebUI",
                 "type": "bool",
-                "hint": "关闭后不会启动网页管理界面。",
+                "hint": "总开关。关闭后不会启动网页管理界面，也无法通过浏览器查看日记、活动和配置页。",
                 "default": False,
             },
             "webui.host": {
                 "description": "WebUI 监听地址",
                 "type": "string",
-                "hint": "本机使用可填 127.0.0.1；局域网访问可填 0.0.0.0。",
+                "hint": "只在本机访问时建议填 127.0.0.1；需要让局域网内其他设备访问时再填 0.0.0.0。",
                 "default": "0.0.0.0",
             },
             "webui.port": {
                 "description": "WebUI 端口",
                 "type": "int",
-                "hint": "默认 6314，修改后需要按新端口访问 WebUI。",
+                "hint": "默认 6314。修改后访问地址会变成新端口；如果端口被占用，WebUI 可能会自动回退到别的可用端口。",
                 "default": 6314,
                 "min": 1024,
                 "max": 65535,
@@ -2976,19 +2976,19 @@ class WebServer:
             "webui.auth_enabled": {
                 "description": "启用访问密码",
                 "type": "bool",
-                "hint": "开启后访问 WebUI 时需要先登录。",
+                "hint": "建议保持开启。关闭后，只要能访问到这个地址的人都可以直接打开 WebUI。",
                 "default": True,
             },
             "webui.password": {
                 "description": "WebUI 密码",
                 "type": "password",
-                "hint": "留空时会在首次启动时自动生成随机密码。",
+                "hint": "留空时会在首次启动时自动生成随机密码；手动填写后，浏览器登录和外部 API 鉴权都会使用这个值。",
                 "default": "",
             },
             "webui.session_timeout": {
                 "description": "会话过期时间",
                 "type": "int",
-                "hint": "单位为秒，超时后需要重新登录。",
+                "hint": "单位为秒。时间越短越安全，但你会更频繁地重新登录；默认 3600 秒通常够用。",
                 "default": 3600,
                 "min": 300,
                 "max": 604800,
@@ -2996,7 +2996,7 @@ class WebServer:
             "webui.allow_external_api": {
                 "description": "允许外部 API 调用",
                 "type": "bool",
-                "hint": "开启后外部服务可以调用部分 WebUI 接口，默认建议关闭。",
+                "hint": "开启后，外部服务可通过 `/api/analyze` 等接口调用识图分析。除非你明确要接别的服务，否则建议保持关闭。",
                 "default": False,
             },
         }
@@ -3013,19 +3013,19 @@ class WebServer:
                 "enable_window_companion": {
                     "description": "开启窗口自动陪伴",
                     "type": "bool",
-                    "hint": "命中的窗口一出现就自动把 Bot 叫过来陪你，窗口关闭后自动结束。",
+                    "hint": "命中的窗口一出现就自动开始陪伴，窗口消失后再自动结束。适合常驻游戏、IDE、视频播放器这类固定场景。",
                     "default": False,
                 },
                 "window_companion_targets": {
                     "description": "窗口陪伴目标",
                     "type": "text",
-                    "hint": "每行一个窗口关键字，也支持\"关键字|补充提示词\"的格式，适合给不同窗口加不同陪伴重点。",
+                    "hint": "每行一个窗口关键字；也支持“关键字|补充提示词”。例如：`Cursor|重点关注报错和下一步`，适合给不同窗口加不同陪伴重点。",
                     "default": "",
                 },
                 "window_companion_check_interval": {
                     "description": "窗口检查间隔",
                     "type": "int",
-                    "hint": "后台每隔多少秒检查一次目标窗口是否出现或关闭。",
+                    "hint": "后台每隔多少秒检查一次目标窗口是否出现或关闭。值越小越灵敏，值越大越省资源。",
                     "default": 5,
                     "min": 2,
                     "max": 300,
@@ -3033,7 +3033,7 @@ class WebServer:
                 "enable_input_stats": {
                     "description": "启用本地输入统计",
                     "type": "bool",
-                    "hint": "开启后会尝试监听全局键盘和鼠标输入，用于补充键盘和鼠标维度的活动回顾。默认依赖已随基础安装提供，但系统可能仍需授予输入监听权限。",
+                    "hint": "开启后会监听全局键盘和鼠标输入，用来补充工作轨迹、活跃度和离开判断。系统层面可能仍需授予输入监听权限。",
                     "default": False,
                 },
                 "enable_background_activity_tracking": {
@@ -3056,7 +3056,7 @@ class WebServer:
                 "input_stats_flush_interval": {
                     "description": "输入统计落盘间隔",
                     "type": "int",
-                    "hint": "输入统计写入本地 JSON 的间隔秒数。值越小越实时，值越大越省 IO。",
+                    "hint": "每隔多少秒把输入统计写入本地 JSON。值越小越实时，值越大越省磁盘 IO。",
                     "default": 60,
                     "min": 10,
                     "max": 3600,
@@ -3064,14 +3064,14 @@ class WebServer:
                 "enable_away_auto_pause": {
                     "description": "离开电脑时自动挂起观察",
                     "type": "bool",
-                    "hint": "仅在启用本地输入统计后生效。非观影场景下，如果较长时间没有键鼠输入，就先暂停自动观察；检测到你回来后再自动恢复。",
+                    "hint": "仅在启用本地输入统计后生效。长时间没有键鼠输入时，自动观察会先安静下来；检测到你回来后再恢复。",
                     "default": False,
                     "condition": {"enable_input_stats": True},
                 },
                 "away_auto_pause_threshold": {
                     "description": "自动挂起阈值",
                     "type": "int",
-                    "hint": "连续多久没有输入后，认为用户已经暂时离开电脑前并挂起自动观察。",
+                    "hint": "连续多久没有输入后，认为你暂时离开电脑，并挂起自动观察。",
                     "default": 1200,
                     "min": 300,
                     "max": 14400,
@@ -3083,7 +3083,7 @@ class WebServer:
                 "away_long_notice_threshold": {
                     "description": "长时间离开提醒阈值",
                     "type": "int",
-                    "hint": "离开时间超过这个阈值时，只额外发一次轻量提醒文案，然后继续安静等待。",
+                    "hint": "离开时间超过这个阈值时，只额外发一次轻量提醒，然后继续安静等待，不会持续刷消息。",
                     "default": 3600,
                     "min": 600,
                     "max": 86400,

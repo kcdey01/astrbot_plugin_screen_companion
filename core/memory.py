@@ -1416,8 +1416,16 @@ class ScreenCompanionMemoryMixin:
             text = text.strip()
             normalized = re.sub(r"\s+", "", text.lower())
 
-        # 检查是否以"帮我"开头（支持"帮我"和"你帮我"两种形式）
-        if not (normalized.startswith("帮我") or normalized.startswith("你帮我")):
+        request_prefixes = (
+            "帮我",
+            "你帮我",
+            "请帮我",
+            "麻烦帮我",
+            "麻烦你帮我",
+            "可以帮我",
+            "能不能帮我",
+        )
+        if not any(normalized.startswith(prefix) for prefix in request_prefixes):
             return ""
 
         # 应用启动器相关的排除标记，避免与应用启动器插件冲突
@@ -1437,46 +1445,52 @@ class ScreenCompanionMemoryMixin:
         request_markers = (
             "帮我看看",
             "帮我看下",
-            "你帮我看看",
-            "看看这个",
-            "看下这个",
-            "帮我分析",
-            "给点建议",
-            "出什么装备",
-            "这题怎么做",
-            "这个报错",
-            "这个页面",
             "帮我看一下",
+            "你帮我看看",
+            "你帮我看下",
             "你帮我看一下",
+            "帮忙看看",
+            "帮忙看下",
+            "帮我分析",
+            "帮我分析一下",
+            "帮我分析下",
+            "分析一下",
+            "分析下",
+            "给点建议",
             "帮我看看屏幕",
             "帮我看下屏幕",
+            "帮我看一下屏幕",
+            "帮我看看截图",
+            "帮我看下截图",
+            "帮我看看报错",
+            "帮我看看代码",
+            "帮我看看题目",
             "看看屏幕",
             "看下屏幕",
+            "看一下屏幕",
+            "看看截图",
+            "看下截图",
         )
-        context_markers = (
+        screen_context_markers = (
             "屏幕",
             "画面",
             "窗口",
-            "这题",
-            "这个",
-            "这一题",
-            "这局",
-            "装备",
+            "截图",
+            "识屏",
+            "界面",
+            "页面",
+        )
+        task_context_markers = (
             "报错",
             "代码",
-            "页面",
-            "界面",
             "文档",
             "作业",
             "游戏",
             "题目",
             "插件",
             "网页",
-            "截图",
-            "当前",
-            "这个问题",
-            "这个地方",
-            "这里",
+            "装备",
+            "日志",
         )
         negative_markers = (
             "不用看",
@@ -1495,17 +1509,13 @@ class ScreenCompanionMemoryMixin:
             return ""
 
         has_request = any(marker in normalized for marker in request_markers)
-        has_context = any(marker in normalized for marker in context_markers)
-        
-        # 优化：如果包含"帮我"且消息长度合理，即使没有明确的上下文标记也尝试识屏
-        # 这样可以避免误触导致的空消息
-        has_help = "帮我" in normalized
-        if has_help and len(text) >= 3 and len(text) <= 100:
-            # 如果只有"帮我"但没有上下文，仍然尝试处理，但返回原文本
-            return text[:160]
-        
-        # 原有逻辑：需要同时有请求和上下文标记
-        if not (has_request and has_context):
+        has_screen_context = any(marker in normalized for marker in screen_context_markers)
+        has_task_context = any(marker in normalized for marker in task_context_markers)
+
+        if not has_request:
+            return ""
+
+        if not (has_screen_context or has_task_context):
             return ""
 
         return text[:160]
