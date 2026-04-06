@@ -121,6 +121,38 @@ class PluginConfig(BaseModel):
     # === WebUI 管理界面 ===
     webui: WebuiConfig = Field(default_factory=WebuiConfig)
 
+    @staticmethod
+    def normalize_path_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+
+        # 兼容历史脏值，避免把 Windows 盘符误保存成 ':E:\' 这类非法路径。
+        if len(text) >= 4 and text[0] == ":" and text[1].isalpha() and text[2] == ":" and text[3] in "\\/":
+            fixed = text[1:]
+            logger.warning(f"[Config] 检测到异常路径前缀，已自动修正: {text!r} -> {fixed!r}")
+            text = fixed
+
+        # 某些上游会把 Windows 绝对路径保存成 '/E:/' 或 '\\E:\\' 形式，这里也一并矫正。
+        if len(text) >= 4 and text[0] in "\\/" and text[1].isalpha() and text[2] == ":" and text[3] in "\\/":
+            fixed = text[1:]
+            logger.warning(f"[Config] 检测到异常绝对路径格式，已自动修正: {text!r} -> {fixed!r}")
+            text = fixed
+
+        return text
+
+    @field_validator(
+        "ffmpeg_path",
+        "diary_storage",
+        "shared_screenshot_dir",
+        "learning_storage",
+        "observation_storage",
+        mode="before",
+    )
+    @classmethod
+    def validate_path_fields(cls, v):
+        return cls.normalize_path_text(v)
+
     # 验证器
     @field_validator("screen_recognition_mode", mode="before")
     @classmethod

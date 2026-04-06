@@ -156,6 +156,7 @@ class ScreenCompanionMediaMixin:
     ):
         """清理沉浸感较差的播报式开场，尤其是视频和阅读场景。"""
         response_text = str(response_text or "").strip()
+        response_text = self._strip_response_markdown_artifacts(response_text)
         recent_contexts = list(contexts or [])
         has_recent_context = bool(recent_contexts)
 
@@ -202,7 +203,78 @@ class ScreenCompanionMediaMixin:
         ):
             response_text = self._strip_rest_cue_sentences(response_text)
 
+        response_text = self._soften_screen_reply_phrasing(response_text)
+        response_text = self._trim_overstyled_screen_sentences(response_text)
+
         return response_text.strip()
+
+    def _strip_response_markdown_artifacts(self, text: str) -> str:
+        import re
+
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+
+        cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned, flags=re.S)
+        cleaned = re.sub(r"__(.*?)__", r"\1", cleaned, flags=re.S)
+        cleaned = re.sub(r"^[ \t]*#{1,6}[ \t]*", "", cleaned, flags=re.M)
+        cleaned = re.sub(r"^[ \t]*[-*][ \t]+", "", cleaned, flags=re.M)
+        cleaned = re.sub(r"^[ \t]*>[ \t]*", "", cleaned, flags=re.M)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
+
+    def _soften_screen_reply_phrasing(self, text: str) -> str:
+        softened = str(text or "").strip()
+        if not softened:
+            return ""
+
+        replacements = (
+            ("建议你可以", "你可以"),
+            ("建议你先", "你可以先"),
+            ("建议你", "你可以"),
+            ("建议最后", "最后"),
+            ("建议先", "可以先"),
+            ("建议待会儿", "待会儿可以"),
+            ("建议还是", "还是"),
+        )
+        for source, target in replacements:
+            softened = softened.replace(source, target)
+        return softened.strip()
+
+    def _trim_overstyled_screen_sentences(self, text: str) -> str:
+        import re
+
+        original = str(text or "").strip()
+        if not original:
+            return ""
+
+        cliche_markers = (
+            "手感依旧在线",
+            "简直是大优局",
+            "稳稳拿下了",
+            "节奏完全在你手里",
+            "妥妥的第一梯队",
+            "手感应该热得发烫",
+            "背景里这音乐",
+            "继续保持这种压制力就行",
+            "我也正好陪你看看这把的评分战绩",
+        )
+        pieces = re.split(r"(?<=[。！？!?])\s*|\n+", original)
+        kept_pieces = []
+        for piece in pieces:
+            sentence = piece.strip()
+            if not sentence:
+                continue
+            if any(marker in sentence for marker in cliche_markers):
+                continue
+            kept_pieces.append(sentence)
+
+        if not kept_pieces:
+            return original
+
+        cleaned = " ".join(kept_pieces).strip()
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        return cleaned or original
 
     def _learn_from_correction(self, original_response, corrected_response):
         """从用户纠正中学习。"""

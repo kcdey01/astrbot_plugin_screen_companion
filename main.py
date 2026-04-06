@@ -271,6 +271,16 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
+    def _normalize_config_path(self, value: Any, *, field_name: str) -> str:
+        normalized = PluginConfig.normalize_path_text(value)
+        if normalized != str(value or "").strip():
+            logger.warning(f"配置项 {field_name} 包含异常路径，已自动修正为: {normalized}")
+            try:
+                setattr(self.plugin_config, field_name, normalized)
+            except Exception as e:
+                logger.debug(f"回写修正后的路径配置失败 {field_name}: {e}")
+        return normalized
+
     def _get_runtime_flag(self, name: str, default: bool = False) -> bool:
         return self._coerce_bool(getattr(self, name, default))
 
@@ -357,10 +367,14 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         event: AstrMessageEvent,
         *,
         reply_on_denied: bool = True,
+        stop_on_denied: bool | None = None,
         message: str = "权限不足：仅管理员可使用该功能。",
     ) -> bool:
         if self._has_admin_permission(event):
             return True
+
+        if stop_on_denied is None:
+            stop_on_denied = reply_on_denied
 
         if reply_on_denied:
             try:
@@ -368,10 +382,11 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             except Exception as e:
                 logger.debug(f"发送权限不足提示失败: {e}")
 
-        try:
-            event.stop_event()
-        except Exception:
-            pass
+        if stop_on_denied:
+            try:
+                event.stop_event()
+            except Exception:
+                pass
         return False
 
     def _sync_all_config(self) -> None:
@@ -395,7 +410,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             )
         )
         self.image_prompt = self.plugin_config.image_prompt
-        self.ffmpeg_path = getattr(self.plugin_config, "ffmpeg_path", "")
+        self.ffmpeg_path = self._normalize_config_path(
+            getattr(self.plugin_config, "ffmpeg_path", ""),
+            field_name="ffmpeg_path",
+        )
         self.recording_fps = max(
             0.01, float(getattr(self.plugin_config, "recording_fps", self.RECORDING_FPS) or self.RECORDING_FPS)
         )
@@ -438,7 +456,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.diary_time = normalized_diary_time
         if normalized_diary_time != raw_diary_time:
             self.plugin_config.diary_time = normalized_diary_time
-        self.diary_storage = self.plugin_config.diary_storage
+        self.diary_storage = self._normalize_config_path(
+            self.plugin_config.diary_storage,
+            field_name="diary_storage",
+        )
         self.diary_reference_days = self.plugin_config.diary_reference_days
         self.diary_auto_recall = self._coerce_bool(self.plugin_config.diary_auto_recall)
         self.diary_recall_time = self.plugin_config.diary_recall_time
@@ -512,7 +533,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             ),
         )
         self.use_shared_screenshot_dir = self._coerce_bool(self.plugin_config.use_shared_screenshot_dir)
-        self.shared_screenshot_dir = self.plugin_config.shared_screenshot_dir
+        self.shared_screenshot_dir = self._normalize_config_path(
+            self.plugin_config.shared_screenshot_dir,
+            field_name="shared_screenshot_dir",
+        )
         self.custom_tasks = self.plugin_config.custom_tasks
         self.rest_time_range = self.plugin_config.rest_time_range
         self.enable_learning = self._coerce_bool(self.plugin_config.enable_learning)
@@ -528,7 +552,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.enable_shared_activity_preference_learning = self._coerce_bool(
             getattr(self.plugin_config, "enable_shared_activity_preference_learning", True)
         )
-        self.learning_storage = self.plugin_config.learning_storage
+        self.learning_storage = self._normalize_config_path(
+            self.plugin_config.learning_storage,
+            field_name="learning_storage",
+        )
         if not self.learning_storage:
             self.learning_storage = str(self.plugin_config.learning_dir)
         self.input_stats_file = os.path.join(self.learning_storage, "input_stats_daily.json")
@@ -543,7 +570,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             self.plugin_config.current_preset_index = -1
         self._sync_window_companion_effective_params()
         # 同步配置
-        self.observation_storage = self.plugin_config.observation_storage
+        self.observation_storage = self._normalize_config_path(
+            self.plugin_config.observation_storage,
+            field_name="observation_storage",
+        )
         self.max_observations = self.plugin_config.max_observations
         self.interaction_frequency = self.plugin_config.interaction_frequency
         self.image_quality = self.plugin_config.image_quality
@@ -1172,21 +1202,25 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             return
 
         try:
-            if not await self._ensure_admin_permission(event, reply_on_denied=False):
-                if self.debug:
-                    sender_id = self._get_event_sender_id(event) or "<unknown>"
-                    scope = "群聊" if self._is_group_message_event(event) else "私聊"
-                    logger.info(
-                        f"自然语言识屏求助被拒绝：{scope} 发送者 {sender_id} 没有权限"
-                    )
-                return
-
             message_text = str(getattr(event, "message_str", "") or "").strip()
             if not message_text or message_text.startswith("/"):
                 return
 
             request_prompt = self._extract_screen_assist_prompt(message_text)
             if not request_prompt:
+                return
+
+            if not await self._ensure_admin_permission(
+                event,
+                reply_on_denied=False,
+                stop_on_denied=False,
+            ):
+                if self.debug:
+                    sender_id = self._get_event_sender_id(event) or "<unknown>"
+                    scope = "群聊" if self._is_group_message_event(event) else "私聊"
+                    logger.info(
+                        f"自然语言识屏求助被拒绝：{scope} 发送者 {sender_id} 没有权限"
+                    )
                 return
 
             cooldown_key = str(getattr(event, "unified_msg_origin", "") or getattr(event, "get_sender_id", lambda: "")())
@@ -1204,8 +1238,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                     logger.warning(f"自然语言识屏求助环境检查失败: {err_msg}")
                 return
             custom_prompt = (
-                "这是用户主动请求你看看当前屏幕并给建议。"
-                "请直接回应眼前任务，不要提自动撤回或系统设定。"
+                "这是用户主动请求你看看当前屏幕。"
+                "请像聊天里顺手接一句那样回应，先说最关键的判断。"
+                "如果要提建议，只给当前最有用的一条，不要写成解说词、战报腔或固定的夸赞加总结模板。"
+                "不要提自动撤回或系统设定。"
             )
             screen_result = await self._run_screen_assist(
                 event,
