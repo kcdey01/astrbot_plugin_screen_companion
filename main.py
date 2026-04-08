@@ -1285,19 +1285,6 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             if not message_text or message_text.startswith("/"):
                 return
 
-            if not await self._ensure_admin_permission(
-                event,
-                reply_on_denied=False,
-                stop_on_denied=False,
-            ):
-                if self.debug:
-                    sender_id = self._get_event_sender_id(event) or "<unknown>"
-                    scope = "群聊" if self._is_group_message_event(event) else "私聊"
-                    logger.info(
-                        f"自然语言识屏求助被拒绝：{scope} 发送者 {sender_id} 没有权限"
-                    )
-                return
-
             allow_implicit_trigger = self._allow_implicit_screen_skill_trigger(
                 event,
                 message_text,
@@ -1309,12 +1296,25 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             if not request_prompt:
                 return
 
+            if not await self._ensure_admin_permission(
+                event,
+                reply_on_denied=False,
+                stop_on_denied=False,
+            ):
+                if self.debug:
+                    sender_id = self._get_event_sender_id(event) or "<unknown>"
+                    scope = "群聊" if self._is_group_message_event(event) else "私聊"
+                    logger.debug(
+                        f"自然语言识屏求助被拒绝：{scope} 发送者 {sender_id} 没有权限"
+                    )
+                return
+
             cooldown_key = str(getattr(event, "unified_msg_origin", "") or getattr(event, "get_sender_id", lambda: "")())
             now_ts = time.time()
             last_trigger = float((getattr(self, "_screen_assist_cooldowns", {}) or {}).get(cooldown_key, 0.0))
             if now_ts - last_trigger < 20:
                 if self.debug:
-                    logger.info("自然语言识屏求助命中过冷却时间，跳过触发")
+                    logger.debug("自然语言识屏求助命中过冷却时间，跳过触发")
                 return
             self._screen_assist_cooldowns[cooldown_key] = now_ts
 
