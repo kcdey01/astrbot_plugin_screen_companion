@@ -2548,6 +2548,7 @@ class ScreenCompanionMemoryMixin:
             "少用夸张语气词、重复感叹和机械鼓劲，宁可自然一点也不要像脚本播报。",
             "避免每次都用相同开场；尤其不要反复写“原来在……呀”“刚才那波……好激烈”“我就在这里陪着你”“加油加油”这类套话。",
             "如果这一轮只有一条小观察，就直接说重点，不必硬凑成两三句完整播报。",
+            "不要把模糊观察硬写成非常具体的人名、角色名、道具名、地点名或技能名。",
         ]
 
         if bool(getattr(self, "use_companion_mode", False)):
@@ -2565,6 +2566,13 @@ class ScreenCompanionMemoryMixin:
         if scene in ("视频", "阅读"):
             guide_parts.append(
                 "当前场景更适合轻一点，别打断用户的沉浸感。"
+            )
+        elif scene == "游戏":
+            guide_parts.append(
+                "当前是游戏场景时，优先说看得清的阶段和状态，比如选项界面、对局中、商店里、团战中；不要凭模糊画面猜具体英雄、强化、装备、队友或战术。"
+            )
+            guide_parts.append(
+                "除非用户明确在问攻略，否则不要一上来就教连招、配装、阵容配合；更不要根据猜测下指导。"
             )
         else:
             guide_parts.append(
@@ -2589,6 +2597,10 @@ class ScreenCompanionMemoryMixin:
         guide_parts.append(
             "更像一起看屏幕时顺手说的一句话：能具体就具体，没必要就别热场。"
         )
+        if scene in ("游戏", "视频", "音乐", "浏览-娱乐"):
+            guide_parts.append(
+                "娱乐场景下，默认压到 1 到 2 句，别凑成整段夸夸其谈。"
+            )
 
         return "\n".join(guide_parts)
 
@@ -5161,6 +5173,13 @@ class ScreenCompanionMemoryMixin:
             "把这次回复当成社交媒体私聊里的连续聊天，不要像重新开一个新话题。",
             "优先像人类顺手接话：短一点、自然一点、留白一点。",
         ]
+        if self._normalize_scene_label(scene) == "游戏":
+            guidance_lines.extend(
+                [
+                    "如果没有特别明确的画面证据，就不要装作已经认出具体角色、模式、强化或阵容。",
+                    "这轮更适合像顺手点评一句，而不是切成陪玩教练模式长篇指挥。",
+                ]
+            )
 
         if intent_action == "clarify_or_switch":
             style = "quick_clarify"

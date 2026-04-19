@@ -329,16 +329,26 @@ class ScreenCompanionMediaMixin:
     def _build_grounded_screen_reply_guide(
         self,
         *,
+        scene: str,
         fact_digest: dict[str, Any] | None,
         custom_prompt: str,
         context_count: int,
     ) -> str:
         fact_lines = list((fact_digest or {}).get("summary_lines", []) or [])
+        normalized_scene = self._normalize_scene_label(scene)
         guide_lines = [
             "只根据当前画面与上文里能确认的事实回答。",
             "如果看不清或证据不够，直接承认不确定，不要硬猜。",
             "不要编造未看到的具体结果、文档内容、按钮状态、聊天对象或任务结论。",
         ]
+        if normalized_scene == "游戏":
+            guide_lines.extend(
+                [
+                    "游戏场景里，不要猜英雄名、模式名、强化名、装备名、技能名、队友或对手阵容。",
+                    "除非这些专有名词在画面里清晰可读，否则宁可只说“像是在选项界面/团战里/商店里”，不要说具体名词。",
+                    "不要根据常见套路自动给出配装、连招、阵容配合或战术建议。",
+                ]
+            )
         if fact_lines:
             guide_lines.append("回答时可以引用当前画面里的事实，但不要为了像在识屏而机械复述。")
         else:
@@ -5018,6 +5028,7 @@ class ScreenCompanionMediaMixin:
 
             prompt_parts.append(
                 self._build_grounded_screen_reply_guide(
+                    scene=scene,
                     fact_digest=fact_digest,
                     custom_prompt=custom_prompt,
                     context_count=len(contexts),
