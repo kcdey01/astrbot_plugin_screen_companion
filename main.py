@@ -11,12 +11,18 @@ from typing import Any
 DEFAULT_SYSTEM_PROMPT = """
 你是一个会陪用户一起看屏幕、一起推进当下任务的屏幕伙伴。
 请自然、克制、具体地回应用户，优先给当前任务真正有帮助的观察、判断和建议，避免机械播报和空泛说教。
+当文字上下文不足以判断当前屏幕或近期电脑使用情况时，你可以按需调用可用工具先确认；只在真的需要时再调用，不要每轮都窥屏或查记录。
 """
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star
+from astrbot.core.agent.run_context import ContextWrapper
+from astrbot.core.agent.tool import FunctionTool, ToolExecResult
+from astrbot.core.astr_agent_context import AstrAgentContext
+from pydantic import Field
+from pydantic.dataclasses import dataclass
 
 from .core.config import PluginConfig
 from .core.proactive import ScreenCompanionProactiveMixin
@@ -25,6 +31,8 @@ from .core.memory import ScreenCompanionMemoryMixin
 from .core.media import ScreenCompanionMediaMixin
 from .core.input_stats import ScreenCompanionInputStatsMixin
 from .core.command_support import ScreenCompanionCommandSupportMixin
+
+_screen_companion_tool_plugin = None
 
 
 def admin_required(func):
@@ -54,6 +62,227 @@ def admin_required(func):
         return func(self, event, *args, **kwargs)
 
     return sync_wrapper
+
+
+def _get_tool_event(context: Any) -> AstrMessageEvent | None:
+    try:
+        agent_ctx = getattr(context, "context", None)
+        event = getattr(agent_ctx, "event", None) if agent_ctx else None
+        if event is None and agent_ctx is not None:
+            event = getattr(getattr(agent_ctx, "context", None), "event", None)
+        return event
+    except Exception:
+        return None
+
+
+def _extract_plain_text(components: Any) -> str:
+    if not isinstance(components, list):
+        return ""
+    for component in components:
+        text = str(getattr(component, "text", "") or "").strip()
+        if text:
+            return text
+    return ""
+
+
+@dataclass
+class ScreenPeekTool(FunctionTool[AstrAgentContext]):
+    name: str = "screen_peek"
+    description: str = (
+        "当你需要确认用户当前屏幕上正在做什么、界面里具体出现了什么、"
+        "或需要基于当前画面给出判断时使用。只在当前消息和对话上下文不足时调用。"
+    )
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "这次想通过窥屏确认的重点，可留空，例如“确认当前在做什么”或“看看报错/界面重点”。",
+                },
+                "_": {
+                    "type": "string",
+                    "description": "Optional placeholder. Leave empty.",
+                },
+            },
+            "required": [],
+        }
+    )
+
+    async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
+        plugin = _screen_companion_tool_plugin
+        if plugin is None:
+            return "屏幕陪伴工具当前不可用。"
+
+        question = str(kwargs.get("question", "") or "").strip()
+        event = _get_tool_event(context.context)
+        try:
+            capture_context = await plugin._capture_recognition_context()
+            active_window_title = str(capture_context.get("active_window_title", "") or "")
+            components = await plugin._analyze_screen(
+                capture_context,
+                session=event,
+                active_window_title=active_window_title,
+                custom_prompt=question,
+                task_id="llm_tool_screen_peek",
+                user_request_text=question or "请先看一下当前屏幕的关键信息",
+            )
+            result_text = _extract_plain_text(components)
+            if result_text:
+                return result_text
+            return "这次没有拿到可用的屏幕观察结果，可能当前不在允许识屏的时段，或画面分析没有返回有效文本。"
+        except Exception as e:
+            logger.error("LLM 工具 screen_peek 调用失败: %s", e)
+            return f"窥屏失败：{e}"
+
+
+@dataclass
+class ScreenUsageContextTool(FunctionTool[AstrAgentContext]):
+    name: str = "screen_usage_context"
+    description: str = (
+        "当你需要了解用户最近在电脑上主要做了什么、持续了多久、"
+        "或最近浏览过哪些页面时使用。只在确实需要近期活动轨迹时调用，不要每轮都查。"
+    )
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "这次想确认的近期使用情况，可留空，例如“最近在忙什么”或“最近看了哪些网页”。",
+                },
+                "include_browser_history": {
+                    "type": "boolean",
+                    "description": "如果这次确实需要更强的网页浏览旁证，可以设为 true；否则默认 false。",
+                },
+                "_": {
+                    "type": "string",
+                    "description": "Optional placeholder. Leave empty.",
+                },
+            },
+            "required": [],
+        }
+    )
+
+    async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
+        plugin = _screen_companion_tool_plugin
+        if plugin is None:
+            return "电脑使用情况工具当前不可用。"
+
+        question = str(kwargs.get("question", "") or "").strip()
+        include_browser_history = bool(kwargs.get("include_browser_history", False))
+
+        try:
+            active_window_title, _ = await asyncio.to_thread(plugin._get_active_window_info)
+            active_window_title = plugin._normalize_window_title(active_window_title)
+            scene = ""
+            if active_window_title:
+                scene = plugin._normalize_scene_label(plugin._identify_scene(active_window_title))
+
+            request_flags = plugin._looks_like_usage_context_request(question)
+            item_limit = max(1, int(getattr(plugin, "usage_context_item_limit", 6) or 6))
+            lookback_hours = max(1, int(getattr(plugin, "usage_context_lookback_hours", 6) or 6))
+            browser_lookback_minutes = max(
+                10,
+                int(getattr(plugin, "browser_history_lookback_minutes", 180) or 180),
+            )
+
+            sections: list[str] = []
+
+            live_snapshot = plugin._build_current_activity_snapshot()
+            if live_snapshot:
+                live_label = str(
+                    live_snapshot.get("page_title")
+                    or live_snapshot.get("site_label")
+                    or live_snapshot.get("app_name")
+                    or live_snapshot.get("resource_label")
+                    or live_snapshot.get("window")
+                    or ""
+                ).strip()
+                if live_label:
+                    sections.append(
+                        "当前活动："
+                        f"{live_label}，已约 {plugin._format_usage_context_duration(live_snapshot.get('duration', 0))}"
+                    )
+
+            activity_lines = plugin._build_recent_activity_summary_lines(
+                lookback_hours=lookback_hours,
+                limit=item_limit,
+            )
+            if activity_lines:
+                sections.append("最近活动轨迹：\n" + "\n".join(f"- {line}" for line in activity_lines))
+            scene_lines = plugin._build_recent_scene_summary_lines(
+                lookback_hours=lookback_hours,
+                limit=max(3, min(item_limit, 5)),
+            )
+            if scene_lines:
+                sections.append("最近时间分布：\n" + "\n".join(f"- {line}" for line in scene_lines))
+            app_lines = plugin._build_recent_app_summary_lines(
+                lookback_hours=lookback_hours,
+                limit=max(3, min(item_limit, 5)),
+            )
+            if app_lines:
+                sections.append("最近常用应用：\n" + "\n".join(f"- {line}" for line in app_lines))
+
+            if bool(getattr(plugin, "enable_input_stats", False)):
+                payload = plugin._build_input_stats_payload(
+                    days=max(1, min(7, (lookback_hours + 23) // 24))
+                )
+                if payload.get("available"):
+                    today = payload.get("today", {}) or {}
+                    input_lines = [
+                        (
+                            f"今天本地输入约 {today.get('total_inputs_label', '0 次')}，"
+                            f"活跃 {today.get('active_minutes_label', '0 分钟')}"
+                        )
+                    ]
+                    peak_hour_label = str(today.get("peak_hour_label", "") or "").strip()
+                    if peak_hour_label and peak_hour_label != "暂无":
+                        input_lines.append(f"输入高峰大致在 {peak_hour_label}")
+                    sections.append("输入活跃度：\n" + "\n".join(f"- {line}" for line in input_lines[:2]))
+
+            need_browser_lines = bool(
+                request_flags.get("browser")
+                or include_browser_history
+                or scene.startswith("浏览")
+                or scene in {"邮件", "社交"}
+            )
+            if need_browser_lines:
+                browser_lines = plugin._build_recent_browsing_activity_lines(
+                    lookback_hours=lookback_hours,
+                    limit=item_limit,
+                )
+                if browser_lines:
+                    sections.append(
+                        "最近浏览轨迹：\n" + "\n".join(f"- {line}" for line in browser_lines)
+                    )
+
+            if include_browser_history and bool(getattr(plugin, "enable_local_browser_history", False)):
+                browser_history_lines = plugin._build_local_browser_history_lines(
+                    lookback_minutes=browser_lookback_minutes,
+                    limit=item_limit,
+                )
+                if browser_history_lines:
+                    sections.append(
+                        "本地浏览器历史旁证：\n"
+                        + "\n".join(f"- {line}" for line in browser_history_lines)
+                    )
+
+            if not sections:
+                return "这次没有整理出足够明显的近期使用轨迹。"
+
+            header = "电脑使用情况摘要："
+            if scene or active_window_title:
+                scene_label = scene or "未识别场景"
+                window_label = active_window_title or "未知窗口"
+                header += f"\n当前窗口：{window_label}（{scene_label}）"
+            if question:
+                header += f"\n查询重点：{question}"
+            return header + "\n" + "\n".join(sections)
+        except Exception as e:
+            logger.error("LLM 工具 screen_usage_context 调用失败: %s", e)
+            return f"读取电脑使用情况失败：{e}"
+
 
 class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin, ScreenCompanionMemoryMixin, ScreenCompanionInputStatsMixin, ScreenCompanionMediaMixin, ScreenCompanionCommandSupportMixin, Star):
     SCREEN_SKILL_NAME = "screen_skill"
@@ -99,8 +328,18 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         import os
 
         super().__init__(context)
+        global _screen_companion_tool_plugin
+        _screen_companion_tool_plugin = self
         
         self.plugin_config = PluginConfig(config, context)
+
+        try:
+            self.context.add_llm_tools(
+                ScreenPeekTool(),
+                ScreenUsageContextTool(),
+            )
+        except Exception as e:
+            logger.warning("注册屏幕陪伴 LLM 工具失败: %s", e)
         
         self._sync_all_config()
         self._instance_token = ""
@@ -268,6 +507,9 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
     async def terminate(self) -> None:
         """AstrBot 重载/卸载时的生命周期钩子。"""
         logger.info("收到 terminate 生命周期回调，准备停止屏幕伙伴插件")
+        global _screen_companion_tool_plugin
+        if _screen_companion_tool_plugin is self:
+            _screen_companion_tool_plugin = None
         await self.stop()
 
     @staticmethod
@@ -489,6 +731,37 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.active_time_range = self.plugin_config.active_time_range
         self.use_companion_mode = self._coerce_bool(self.plugin_config.use_companion_mode)
         self.companion_prompt = getattr(self.plugin_config, 'companion_prompt', '')
+        self.stealth_watch_mode = self._coerce_bool(
+            getattr(self.plugin_config, "stealth_watch_mode", False)
+        )
+        self.enable_usage_context_autopilot = self._coerce_bool(
+            getattr(self.plugin_config, "enable_usage_context_autopilot", False)
+        )
+        self.enable_local_browser_history = self._coerce_bool(
+            getattr(self.plugin_config, "enable_local_browser_history", False)
+        )
+        self.usage_context_lookback_hours = max(
+            1,
+            int(getattr(self.plugin_config, "usage_context_lookback_hours", 6) or 6),
+        )
+        self.browser_history_lookback_minutes = max(
+            10,
+            int(
+                getattr(
+                    self.plugin_config,
+                    "browser_history_lookback_minutes",
+                    180,
+                )
+                or 180
+            ),
+        )
+        self.usage_context_item_limit = max(
+            1,
+            min(
+                12,
+                int(getattr(self.plugin_config, "usage_context_item_limit", 6) or 6),
+            ),
+        )
         self.capture_active_window = self._coerce_bool(self.plugin_config.capture_active_window)
         self.bot_vision_quality = self.plugin_config.bot_vision_quality
         self.screen_recognition_mode = self._normalize_screen_recognition_mode(

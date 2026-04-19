@@ -1337,65 +1337,53 @@ class ScreenCompanionMemoryMixin:
         normalized_scene = self._normalize_scene_label(scene)
         normalized_window = self._normalize_window_title(active_window_title)
 
-        # 按重要性排序组织提示词部分
         prompt_parts = []
-        
-        # 1. 基础提示词（如果有）
         if base_prompt:
             prompt_parts.append(base_prompt)
-        
-        # 2. 关键上下文信息
+
         if normalized_window:
             prompt_parts.append(f"当前窗口标题：{normalized_window}")
-        
-        # 3. Bot自身识别信息（用于识别屏幕中的自己）
+
         bot_self_info = []
         if hasattr(self, 'bot_appearance') and self.bot_appearance:
             bot_self_info.append(f"Bot的外形描述：{self.bot_appearance}")
-        
+
         if hasattr(self, 'long_term_memory') and self.long_term_memory.get('self_image'):
             self_image_memories = self.long_term_memory['self_image']
-            # 按 count 排序，取最常见的几个记忆
             sorted_memories = sorted(self_image_memories, key=lambda x: x.get('count', 0), reverse=True)[:3]
             if sorted_memories:
                 bot_self_info.append("关于Bot自身的已知信息：")
                 for memory in sorted_memories:
                     bot_self_info.append(f"- {memory['content']}")
-        
+
         if bot_self_info:
             prompt_parts.extend(bot_self_info)
             prompt_parts.append("如果在屏幕中发现符合Bot外形描述的元素，请识别为Bot自己。")
-        
-        # 4. 场景特定指导
+
         scene_prompts = {
-            "编程": "重点分析代码结构、语法、逻辑流程、错误信息、开发环境等。识别用户正在实现的功能、遇到的问题、代码优化空间，并提供具体的技术建议和解决方案。",
-            "设计": "重点分析设计元素、布局、色彩搭配、视觉层次、用户体验等。识别设计任务的目标、当前的视觉问题、可以优化的方向，并提供具体的设计建议和改进方案。",
-            "浏览": "重点分析网页内容、搜索结果、信息结构、导航元素等。识别用户的信息需求、搜索目的、浏览行为，并提供相关的信息整理和使用建议。",
-            "办公": "重点分析文档内容、表格数据、邮件信息、会议安排等。识别用户的办公任务、工作目标、当前进度，并提供具体的工作流程建议和效率提升方案。",
-            "游戏": "重点分析游戏场景、角色状态、资源情况、任务目标、游戏机制等。识别当前游戏局势、玩家需求、可能的策略，并提供具体的游戏建议和技巧。",
-            "视频": "重点分析视频内容、画面细节、人物表情、场景氛围、对话内容等。识别视频的主题、情感基调、关键信息，并提供相关的见解和讨论点。",
-            "阅读": "重点分析文本内容、标题结构、段落大意、关键观点、图表数据等。识别阅读材料的主题、核心思想、重要信息，并提供相关的理解和应用建议。",
+            "编程": "重点识别当前文件、报错、代码修改点、运行结果或卡住的位置，优先给能直接落地的下一步建议。",
+            "设计": "重点识别当前画板、组件、布局变化和明显的视觉问题，建议只给一条最值得先改的点。",
+            "浏览": "重点识别当前页面类型、正在查看的信息和最关键的一处内容，不要把整页都复述一遍。",
+            "办公": "重点识别当前文档、表格、邮件或会议页面里最关键的任务进度与异常。",
+            "游戏": "重点识别能明确看清的游戏事实。只有当英雄名、模式名、装备名、比分或战况在画面里清晰可读时才可以提；看不清就直接写未看清，不要按常见套路猜。",
+            "视频": "重点识别当前视频内容或播放器状态，语气保持轻，不要打断沉浸感。",
+            "阅读": "重点识别正在读的材料主题、当前段落或页面位置，不要扩展成泛泛的总结。",
         }
-        
-        prompt_parts.append(
-            scene_prompts.get(
-                normalized_scene,
-                "请全面分析屏幕内容，识别用户正在进行的活动，提取关键信息和细节，分析可能的问题或需求，并提供具体、实用的建议。",
-            )
+
+        prompt_parts.extend(
+            [
+                scene_prompts.get(
+                    normalized_scene,
+                    "重点识别当前正在进行的活动、最关键的确定线索，以及此刻是否有明显异常或下一步。",
+                ),
+                "输出要求：",
+                "1. 只写你能从当前画面直接确认的事实。",
+                "2. 如果某个细节不能确认，明确标注“未看清”或“不确定”。",
+                "3. 不要为了显得具体而编造细节，不要把猜测写成已发生事实。",
+                "4. 不要输出大段界面描写，不要复述每一个按钮和装饰元素。",
+                "5. 最后一行如需建议，只给一句最值得的建议；没有必要就不写。",
+            ]
         )
-        
-        # 5. 通用分析要求
-        prompt_parts.extend([
-            "请对屏幕内容进行详细分析，提供以下信息：",
-            "1. 屏幕的整体场景和主要内容",
-            "2. 关键元素的详细信息（如文本、图像、界面元素等）",
-            "3. 用户可能正在进行的任务或活动",
-            "4. 可能的问题或挑战",
-            "5. 具体、实用的建议或解决方案",
-            "6. 相关的上下文信息或背景知识",
-            "",
-            "请提供详细、具体的分析结果，避免泛泛而谈或过于简略的描述。"
-        ])
 
         return "\n".join(part for part in prompt_parts if part).strip()
 
@@ -2557,7 +2545,22 @@ class ScreenCompanionMemoryMixin:
             "优先解决用户这轮问题，不要被自己的固定说法带偏。",
             "不要编造，不要过度延伸到当前判断之外的话题。",
             "不要使用 Markdown、加粗、标题、分点或括号旁白。",
+            "少用夸张语气词、重复感叹和机械鼓劲，宁可自然一点也不要像脚本播报。",
+            "避免每次都用相同开场；尤其不要反复写“原来在……呀”“刚才那波……好激烈”“我就在这里陪着你”“加油加油”这类套话。",
+            "如果这一轮只有一条小观察，就直接说重点，不必硬凑成两三句完整播报。",
         ]
+
+        if bool(getattr(self, "use_companion_mode", False)):
+            guide_parts.append(
+                "陪伴模式下，更关注一段时间内的状态延续；必要时可以顺手引用最近的电脑使用状态，但不要喧宾夺主。"
+            )
+        if bool(getattr(self, "stealth_watch_mode", False)):
+            guide_parts.append(
+                "偷看模式下，尽量减少直白监控腔，不要反复写“我看到你”“我刚刚看见你在……”。"
+            )
+            guide_parts.append(
+                "更像悄悄注意到一点变化后顺口说一句：低调、贴近、不过度揭穿。"
+            )
 
         if scene in ("视频", "阅读"):
             guide_parts.append(
@@ -2577,6 +2580,15 @@ class ScreenCompanionMemoryMixin:
             guide_parts.append(
                 "用户这轮有明确要求时，优先贴着用户的问题回答。"
             )
+
+        if recognition_text:
+            guide_parts.append(
+                "如果识屏结果里存在“未看清”“不确定”之类的提示，回复里要保留这种不确定性，不要在成文时把它补成肯定句。"
+            )
+
+        guide_parts.append(
+            "更像一起看屏幕时顺手说的一句话：能具体就具体，没必要就别热场。"
+        )
 
         return "\n".join(guide_parts)
 
@@ -4888,7 +4900,7 @@ class ScreenCompanionMemoryMixin:
         if last_sent_at <= 0:
             return (
                 "这是这段时间里较少见的一次主动靠近。可以自然一点，但仍要直接从当前画面切入，"
-                "不要假装刚才已经接过话，也不要写得像固定问候。",
+                "不要假装刚才已经接过话，也不要写得像固定问候或标准开场白。",
                 {
                     "bucket": "first_touch",
                     "elapsed_seconds": 0,
@@ -4902,7 +4914,7 @@ class ScreenCompanionMemoryMixin:
         if elapsed_seconds < 3 * 60:
             return (
                 f"距离上一次主动回复仅约 {elapsed_text}。这次更像顺着刚才的话补一句，"
-                "只点出新的变化、判断或下一步，不要重新开场，也不要重复同一句提醒。",
+                "只点出新的变化、判断或下一步，不要重新开场，不要重复同一句提醒，也不要再来一遍完整播报。",
                 {
                     "bucket": "immediate_followup",
                     "elapsed_seconds": elapsed_seconds,
@@ -4913,7 +4925,7 @@ class ScreenCompanionMemoryMixin:
         if elapsed_seconds < 15 * 60:
             return (
                 f"距离上一次主动回复约 {elapsed_text}。延续陪伴感即可，可以轻轻承接刚才到现在的新变化，"
-                "但不要把语气写得像重新开始一轮对话。",
+                "但不要把语气写得像重新开始一轮对话，也不要重复使用固定句式。",
                 {
                     "bucket": "recent_followup",
                     "elapsed_seconds": elapsed_seconds,
@@ -4924,7 +4936,7 @@ class ScreenCompanionMemoryMixin:
         if elapsed_seconds < 90 * 60:
             return (
                 f"距离上一次主动回复约 {elapsed_text}。可以有一点重新跟上的感觉，"
-                "先简短点出当前变化，再给一句观察、共鸣或建议；仍然不要太正式。",
+                "先简短点出当前变化，再给一句观察、共鸣或建议；仍然不要太正式，也别写成套路化称赞。",
                 {
                     "bucket": "soft_reentry",
                     "elapsed_seconds": elapsed_seconds,
@@ -4934,7 +4946,7 @@ class ScreenCompanionMemoryMixin:
 
         return (
             f"距离上一次主动回复约 {elapsed_text}。可以带一点隔了一阵子后重新靠近的感觉，"
-            "但仍要立刻落在当前画面，不要长篇回顾，也不要显得生硬客套。",
+            "但仍要立刻落在当前画面，不要长篇回顾，也不要显得生硬客套或像预制台词。",
             {
                 "bucket": "long_gap_reentry",
                 "elapsed_seconds": elapsed_seconds,
@@ -5092,6 +5104,761 @@ class ScreenCompanionMemoryMixin:
             "seconds_since_change": seconds_since_change,
             "prompt_guidance": prompt_guidance,
             "wrap_up_style": profile.get("wrap_up_style", ""),
+        }
+
+    def _build_social_chat_context(
+        self,
+        *,
+        scene: str,
+        contexts: list[str] | None = None,
+        request_intent: dict[str, Any] | None = None,
+        presence_mode: dict[str, Any] | None = None,
+        reply_interval_info: dict[str, Any] | None = None,
+        recognition_text: str = "",
+        active_window_title: str = "",
+    ) -> dict[str, Any]:
+        profile = self._get_scene_behavior_profile(scene)
+        mode = str((presence_mode or {}).get("mode", "") or "")
+        elapsed_seconds = int((reply_interval_info or {}).get("elapsed_seconds", 0) or 0)
+        intent_action = str((request_intent or {}).get("action", "") or "")
+        intent_type = str((request_intent or {}).get("intent_type", "") or "")
+
+        recent_contexts = [str(item or "").strip() for item in list(contexts or []) if str(item or "").strip()]
+        last_assistant = ""
+        last_user = ""
+        for item in reversed(recent_contexts):
+            if not last_assistant and item.startswith("助手:"):
+                last_assistant = item.split(":", 1)[-1].strip()
+            if not last_user and item.startswith("用户:"):
+                last_user = item.split(":", 1)[-1].strip()
+            if last_assistant and last_user:
+                break
+
+        combined_recent = self._normalize_record_text(
+            " ".join(
+                part for part in (
+                    last_user,
+                    last_assistant,
+                    recognition_text,
+                    active_window_title,
+                ) if part
+            )
+        )
+
+        emotion_markers = (
+            "哈哈", "笑死", "绷不住", "离谱", "好烦", "难受", "崩", "绝望",
+            "牛", "爽", "稳", "刺激", "紧张", "好耶", "可恶", "无语",
+        )
+        frustration_markers = (
+            "报错", "失败", "卡住", "不行", "没过", "打断", "崩溃", "死了", "寄",
+            "难受", "麻烦", "无语", "烦",
+        )
+        social_scene = profile["category"] == "entertainment" or self._normalize_scene_label(scene) == "社交"
+
+        style = "light_companion"
+        label = "轻陪伴接话"
+        guidance_lines = [
+            "把这次回复当成社交媒体私聊里的连续聊天，不要像重新开一个新话题。",
+            "优先像人类顺手接话：短一点、自然一点、留白一点。",
+        ]
+
+        if intent_action == "clarify_or_switch":
+            style = "quick_clarify"
+            label = "简短澄清"
+            guidance_lines.extend(
+                [
+                    "这轮更像先接一句澄清，而不是展开点评。",
+                    "先说你现在还没看到用户要找的东西，再请对方切过去或告诉你在哪。"
+                ]
+            )
+        elif intent_type in {"guidance", "verify", "explain"} or profile["category"] == "work":
+            style = "practical_reply"
+            label = "实用接话"
+            guidance_lines.extend(
+                [
+                    "这轮更像认真回一句有用的话，先给结论或下一步，再补一句轻微陪伴感就够了。",
+                    "不要先寒暄半天再进入正题。"
+                ]
+            )
+        elif any(marker in combined_recent for marker in frustration_markers):
+            style = "gentle_support"
+            label = "轻安慰接话"
+            guidance_lines.extend(
+                [
+                    "最近语境里带一点挫败感，先轻轻接住情绪，再给一句不压人的建议。",
+                    "避免高浓度打鸡血，也不要把安慰写成空话。"
+                ]
+            )
+        elif social_scene and any(marker in combined_recent for marker in emotion_markers):
+            style = "banter_reply"
+            label = "轻松接梗"
+            guidance_lines.extend(
+                [
+                    "这轮可以更像私聊里的轻松接梗或顺势吐槽，但仍然要贴着当前内容。",
+                    "别硬抖机灵，别为了活泼而编造细节。"
+                ]
+            )
+        elif mode in {"deep_focus", "focused_work", "ambient_companion"}:
+            style = "low_interrupt"
+            label = "低打扰接话"
+            guidance_lines.extend(
+                [
+                    "当前更适合低打扰，像在聊天框里留一句短短的话。",
+                    "如果没有新的高价值观察，就宁可少说，不要补满。"
+                ]
+            )
+
+        if elapsed_seconds < 3 * 60:
+            guidance_lines.append("延续感要很强，像上一条消息的后半句，不要再做完整开场。")
+        elif elapsed_seconds < 15 * 60:
+            guidance_lines.append("像隔了几分钟又补一句，承接就好，不需要重新自我介绍式开头。")
+        else:
+            guidance_lines.append("虽然隔了一阵，但仍然像同一个聊天窗口里的续上，不要切成客服式问候。")
+
+        guidance_lines.extend(
+            [
+                "尽量使用 1 到 2 句短句；只有用户明确在问问题时才展开到 3 句。",
+                "避免反复称呼用户，避免每次都带夸张语气词。",
+            ]
+        )
+
+        return {
+            "style": style,
+            "label": label,
+            "guidance": "\n".join(guidance_lines),
+            "last_user": self._truncate_preview_text(last_user, limit=80),
+            "last_assistant": self._truncate_preview_text(last_assistant, limit=80),
+        }
+
+    @staticmethod
+    def _format_usage_context_duration(seconds: float | int) -> str:
+        total_seconds = max(0, int(float(seconds or 0)))
+        if total_seconds < 60:
+            return f"{total_seconds}秒"
+        total_minutes = total_seconds // 60
+        if total_minutes < 60:
+            return f"{total_minutes}分钟"
+        hours, minutes = divmod(total_minutes, 60)
+        if minutes == 0:
+            return f"{hours}小时"
+        return f"{hours}小时{minutes}分钟"
+
+    def _looks_like_usage_context_request(
+        self,
+        request_text: str,
+    ) -> dict[str, bool]:
+        normalized = self._normalize_record_text(request_text).casefold()
+        if not normalized:
+            return {
+                "activity": False,
+                "browser": False,
+                "timeline": False,
+            }
+
+        activity_markers = (
+            "在干嘛", "干什么", "做什么", "最近在", "最近都在", "一直在",
+            "用了多久", "多长时间", "停留了多久", "摸鱼", "工作了多久",
+            "切了什么", "用了哪些应用", "打开了什么", "活动轨迹",
+        )
+        browser_markers = (
+            "浏览了什么", "看了什么网页", "哪些网页", "网页", "网站",
+            "浏览记录", "浏览历史", "页面", "标签页", "网址",
+        )
+        timeline_markers = (
+            "刚才", "最近", "之前", "这段时间", "今天", "过去", "一会儿前",
+            "方才", "一直",
+        )
+        return {
+            "activity": any(marker in normalized for marker in activity_markers),
+            "browser": any(marker in normalized for marker in browser_markers),
+            "timeline": any(marker in normalized for marker in timeline_markers),
+        }
+
+    def _build_usage_context_decision(
+        self,
+        *,
+        scene: str,
+        active_window_title: str,
+        request_intent: dict[str, Any] | None = None,
+        contexts: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if not bool(getattr(self, "enable_usage_context_autopilot", False)):
+            return {
+                "enabled": False,
+                "used": False,
+                "include_activity": False,
+                "include_input": False,
+                "include_browser_activity": False,
+                "include_local_browser_history": False,
+                "reason": "使用情况自动参考未开启",
+            }
+
+        normalized_scene = self._normalize_scene_label(scene or "")
+        current_window = self._normalize_window_title(active_window_title or "")
+        request_text = str((request_intent or {}).get("objective", "") or (request_intent or {}).get("request_text", "") or "").strip()
+        request_flags = self._looks_like_usage_context_request(request_text)
+        browser_scene = normalized_scene.startswith("浏览") or normalized_scene in {"邮件", "社交"}
+        if not browser_scene and current_window:
+            browser_scene = self._is_activity_browser_app(
+                self._detect_activity_app_name(current_window)
+            )
+
+        include_activity = bool(
+            request_flags["activity"]
+            or request_flags["timeline"]
+            or getattr(self, "use_companion_mode", False)
+            or getattr(self, "stealth_watch_mode", False)
+        )
+        include_input = bool(
+            getattr(self, "enable_input_stats", False)
+            and (
+                request_flags["activity"]
+                or request_flags["timeline"]
+                or (
+                    getattr(self, "use_companion_mode", False)
+                    and normalized_scene in {"编程", "设计", "办公", "浏览-工作", "邮件"}
+                )
+            )
+        )
+        include_browser_activity = bool(
+            request_flags["browser"]
+            or browser_scene
+            or getattr(self, "stealth_watch_mode", False)
+        )
+        include_local_browser_history = bool(
+            getattr(self, "enable_local_browser_history", False)
+            and (
+                request_flags["browser"]
+                or (browser_scene and getattr(self, "stealth_watch_mode", False))
+            )
+        )
+
+        used = any(
+            (
+                include_activity,
+                include_input,
+                include_browser_activity,
+                include_local_browser_history,
+            )
+        )
+        reasons = []
+        if request_flags["activity"]:
+            reasons.append("用户这轮像是在问最近在做什么/做了多久")
+        if request_flags["browser"]:
+            reasons.append("用户这轮像是在问浏览过哪些页面")
+        if getattr(self, "use_companion_mode", False):
+            reasons.append("陪伴模式允许参考持续使用状态")
+        if getattr(self, "stealth_watch_mode", False):
+            reasons.append("偷看模式更适合低调结合使用轨迹判断状态")
+        if browser_scene:
+            reasons.append("当前场景本身就是浏览器/页面相关")
+
+        return {
+            "enabled": True,
+            "used": used,
+            "include_activity": include_activity,
+            "include_input": include_input,
+            "include_browser_activity": include_browser_activity,
+            "include_local_browser_history": include_local_browser_history,
+            "reason": "；".join(reasons[:4]) or "当前这轮没有命中额外使用情况参考条件",
+            "request_flags": request_flags,
+            "browser_scene": browser_scene,
+        }
+
+    def _build_recent_activity_summary_lines(
+        self,
+        *,
+        lookback_hours: int | None = None,
+        limit: int | None = None,
+    ) -> list[str]:
+        lookback_seconds = max(
+            1,
+            int(lookback_hours or getattr(self, "usage_context_lookback_hours", 6) or 6),
+        ) * 3600
+        item_limit = max(
+            1,
+            int(limit or getattr(self, "usage_context_item_limit", 6) or 6),
+        )
+        cutoff_ts = time.time() - lookback_seconds
+        aggregates: dict[tuple[str, str], dict[str, Any]] = {}
+
+        for item in self._get_activity_history_for_stats():
+            if not isinstance(item, dict):
+                continue
+            end_time = float(item.get("end_time", 0) or 0)
+            if end_time and end_time < cutoff_ts:
+                continue
+            duration = max(
+                0.0,
+                float(
+                    item.get(
+                        "effective_duration",
+                        item.get("raw_duration", item.get("duration", 0)),
+                    )
+                    or 0
+                ),
+            )
+            if duration < 90:
+                continue
+            scene = self._normalize_scene_label(item.get("scene") or "")
+            label = str(
+                item.get("page_title")
+                or item.get("site_label")
+                or item.get("app_name")
+                or item.get("resource_label")
+                or item.get("window")
+                or ""
+            ).strip()
+            if not label:
+                continue
+            key = (scene, label)
+            aggregate = aggregates.setdefault(
+                key,
+                {
+                    "scene": scene,
+                    "label": label,
+                    "duration": 0.0,
+                    "latest_end_time": 0.0,
+                },
+            )
+            aggregate["duration"] += duration
+            aggregate["latest_end_time"] = max(aggregate["latest_end_time"], end_time)
+
+        ranked = sorted(
+            aggregates.values(),
+            key=lambda item: (float(item.get("duration", 0) or 0), float(item.get("latest_end_time", 0) or 0)),
+            reverse=True,
+        )[:item_limit]
+        lines = []
+        for item in ranked:
+            scene = str(item.get("scene", "") or "").strip()
+            label = str(item.get("label", "") or "").strip()
+            duration_label = self._format_usage_context_duration(item.get("duration", 0))
+            if scene:
+                lines.append(f"{label} 约 {duration_label}（{scene}）")
+            else:
+                lines.append(f"{label} 约 {duration_label}")
+        return lines
+
+    def _build_recent_scene_summary_lines(
+        self,
+        *,
+        lookback_hours: int | None = None,
+        limit: int | None = None,
+    ) -> list[str]:
+        lookback_seconds = max(
+            1,
+            int(lookback_hours or getattr(self, "usage_context_lookback_hours", 6) or 6),
+        ) * 3600
+        item_limit = max(
+            1,
+            int(limit or getattr(self, "usage_context_item_limit", 6) or 6),
+        )
+        cutoff_ts = time.time() - lookback_seconds
+        aggregates: dict[str, float] = {}
+
+        for item in self._get_activity_history_for_stats():
+            if not isinstance(item, dict):
+                continue
+            end_time = float(item.get("end_time", 0) or 0)
+            if end_time and end_time < cutoff_ts:
+                continue
+            duration = max(
+                0.0,
+                float(
+                    item.get(
+                        "effective_duration",
+                        item.get("raw_duration", item.get("duration", 0)),
+                    )
+                    or 0
+                ),
+            )
+            if duration < 90:
+                continue
+            scene = self._normalize_scene_label(item.get("scene") or "") or "未识别场景"
+            aggregates[scene] = aggregates.get(scene, 0.0) + duration
+
+        ranked = sorted(
+            aggregates.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:item_limit]
+        return [
+            f"{scene} 约 {self._format_usage_context_duration(duration)}"
+            for scene, duration in ranked
+        ]
+
+    def _build_recent_app_summary_lines(
+        self,
+        *,
+        lookback_hours: int | None = None,
+        limit: int | None = None,
+    ) -> list[str]:
+        lookback_seconds = max(
+            1,
+            int(lookback_hours or getattr(self, "usage_context_lookback_hours", 6) or 6),
+        ) * 3600
+        item_limit = max(
+            1,
+            int(limit or getattr(self, "usage_context_item_limit", 6) or 6),
+        )
+        cutoff_ts = time.time() - lookback_seconds
+        aggregates: dict[str, float] = {}
+
+        for item in self._get_activity_history_for_stats():
+            if not isinstance(item, dict):
+                continue
+            end_time = float(item.get("end_time", 0) or 0)
+            if end_time and end_time < cutoff_ts:
+                continue
+            duration = max(
+                0.0,
+                float(
+                    item.get(
+                        "effective_duration",
+                        item.get("raw_duration", item.get("duration", 0)),
+                    )
+                    or 0
+                ),
+            )
+            if duration < 90:
+                continue
+            app_name = str(
+                item.get("app_name")
+                or self._detect_activity_app_name(item.get("window", "") or "")
+                or ""
+            ).strip()
+            if not app_name:
+                continue
+            aggregates[app_name] = aggregates.get(app_name, 0.0) + duration
+
+        ranked = sorted(
+            aggregates.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:item_limit]
+        return [
+            f"{app_name} 约 {self._format_usage_context_duration(duration)}"
+            for app_name, duration in ranked
+        ]
+
+    def _build_recent_browsing_activity_lines(
+        self,
+        *,
+        lookback_hours: int | None = None,
+        limit: int | None = None,
+    ) -> list[str]:
+        lookback_seconds = max(
+            1,
+            int(lookback_hours or getattr(self, "usage_context_lookback_hours", 6) or 6),
+        ) * 3600
+        item_limit = max(
+            1,
+            int(limit or getattr(self, "usage_context_item_limit", 6) or 6),
+        )
+        cutoff_ts = time.time() - lookback_seconds
+        seen: set[str] = set()
+        lines: list[str] = []
+
+        items = sorted(
+            self._get_activity_history_for_stats(),
+            key=lambda item: float((item or {}).get("end_time", 0) or 0),
+            reverse=True,
+        )
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            end_time = float(item.get("end_time", 0) or 0)
+            if end_time and end_time < cutoff_ts:
+                continue
+            site_label = str(item.get("site_label", "") or "").strip()
+            page_title = str(item.get("page_title", "") or "").strip()
+            if not site_label and not page_title:
+                continue
+            if page_title and site_label:
+                label = f"{site_label} 的《{page_title}》"
+            else:
+                label = page_title or site_label
+            key = label.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(label)
+            if len(lines) >= item_limit:
+                break
+        return lines
+
+    def _get_local_browser_history_candidates(self) -> list[tuple[str, str]]:
+        import glob
+
+        local_appdata = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+        if not local_appdata:
+            return []
+
+        roots = [
+            ("Chrome", os.path.join(local_appdata, "Google", "Chrome", "User Data")),
+            ("Edge", os.path.join(local_appdata, "Microsoft", "Edge", "User Data")),
+            ("Brave", os.path.join(local_appdata, "BraveSoftware", "Brave-Browser", "User Data")),
+        ]
+        candidates: list[tuple[str, str]] = []
+        for browser_name, root in roots:
+            if not os.path.isdir(root):
+                continue
+            profile_paths = [os.path.join(root, "Default", "History")]
+            profile_paths.extend(glob.glob(os.path.join(root, "Profile *", "History")))
+            for path in profile_paths:
+                if os.path.isfile(path):
+                    candidates.append((browser_name, path))
+        return candidates
+
+    def _read_local_browser_history_entries(
+        self,
+        *,
+        lookback_minutes: int | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, str]]:
+        import shutil
+        import sqlite3
+        import tempfile
+        from urllib.parse import urlparse
+
+        lookback_seconds = max(
+            10,
+            int(
+                lookback_minutes
+                or getattr(self, "browser_history_lookback_minutes", 180)
+                or 180
+            ),
+        ) * 60
+        item_limit = max(
+            1,
+            int(limit or getattr(self, "usage_context_item_limit", 6) or 6),
+        )
+        cutoff_unix = time.time() - lookback_seconds
+        chrome_epoch_offset = 11644473600
+        cutoff_chrome_microseconds = int((cutoff_unix + chrome_epoch_offset) * 1_000_000)
+
+        entries: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        for browser_name, db_path in self._get_local_browser_history_candidates():
+            temp_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as temp_file:
+                    temp_path = temp_file.name
+                shutil.copy2(db_path, temp_path)
+                connection = sqlite3.connect(temp_path)
+                try:
+                    cursor = connection.cursor()
+                    cursor.execute(
+                        """
+                        SELECT url, title, last_visit_time
+                        FROM urls
+                        WHERE last_visit_time >= ?
+                        ORDER BY last_visit_time DESC
+                        LIMIT 80
+                        """,
+                        (cutoff_chrome_microseconds,),
+                    )
+                    for url, title, last_visit_time in cursor.fetchall():
+                        normalized_url = str(url or "").strip()
+                        if (
+                            not normalized_url
+                            or normalized_url in seen_urls
+                            or not normalized_url.startswith(("http://", "https://"))
+                        ):
+                            continue
+                        seen_urls.add(normalized_url)
+                        parsed = urlparse(normalized_url)
+                        domain = str(parsed.netloc or "").strip().lower()
+                        if domain.startswith("www."):
+                            domain = domain[4:]
+                        title_text = self._clean_activity_site_label(title or "")
+                        matched = self._match_known_activity_site(f"{title_text} {normalized_url}")
+                        site_label = str(matched.get("site_label", "") or domain or browser_name).strip()
+                        entries.append(
+                            {
+                                "browser": browser_name,
+                                "site_label": site_label,
+                                "page_title": title_text[:96].strip(),
+                                "url": normalized_url[:240],
+                                "domain": domain[:80],
+                                "last_visit_time": str(last_visit_time or ""),
+                            }
+                        )
+                        if len(entries) >= item_limit * 3:
+                            break
+                finally:
+                    connection.close()
+            except Exception as e:
+                logger.debug(f"读取本地浏览器历史失败 {browser_name}: {e}")
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+            if len(entries) >= item_limit * 3:
+                break
+
+        return entries[:item_limit]
+
+    def _build_local_browser_history_lines(
+        self,
+        *,
+        lookback_minutes: int | None = None,
+        limit: int | None = None,
+    ) -> list[str]:
+        lines: list[str] = []
+        for item in self._read_local_browser_history_entries(
+            lookback_minutes=lookback_minutes,
+            limit=limit,
+        ):
+            page_title = str(item.get("page_title", "") or "").strip()
+            site_label = str(item.get("site_label", "") or "").strip()
+            if page_title and site_label:
+                lines.append(f"{site_label} 的《{page_title}》")
+            elif page_title:
+                lines.append(f"《{page_title}》")
+            elif site_label:
+                lines.append(site_label)
+        return lines
+
+    def _build_usage_context_prompt_bundle(
+        self,
+        *,
+        scene: str,
+        active_window_title: str,
+        request_intent: dict[str, Any] | None = None,
+        contexts: list[str] | None = None,
+    ) -> dict[str, Any]:
+        decision = self._build_usage_context_decision(
+            scene=scene,
+            active_window_title=active_window_title,
+            request_intent=request_intent,
+            contexts=contexts,
+        )
+        if not decision.get("enabled"):
+            return decision
+        if not decision.get("used"):
+            return {
+                **decision,
+                "prompt_block": "",
+                "sections": {},
+            }
+
+        item_limit = max(
+            1,
+            int(getattr(self, "usage_context_item_limit", 6) or 6),
+        )
+        lookback_hours = max(
+            1,
+            int(getattr(self, "usage_context_lookback_hours", 6) or 6),
+        )
+        browser_lookback_minutes = max(
+            10,
+            int(getattr(self, "browser_history_lookback_minutes", 180) or 180),
+        )
+        sections: dict[str, list[str]] = {}
+
+        if decision.get("include_activity"):
+            live_snapshot = self._build_current_activity_snapshot()
+            activity_lines = self._build_recent_activity_summary_lines(
+                lookback_hours=lookback_hours,
+                limit=item_limit,
+            )
+            if live_snapshot:
+                live_label = str(
+                    live_snapshot.get("page_title")
+                    or live_snapshot.get("site_label")
+                    or live_snapshot.get("app_name")
+                    or live_snapshot.get("resource_label")
+                    or live_snapshot.get("window")
+                    or ""
+                ).strip()
+                if live_label:
+                    live_line = (
+                        f"当前持续活动：{live_label}，已约 "
+                        f"{self._format_usage_context_duration(live_snapshot.get('duration', 0))}"
+                    )
+                    activity_lines = [live_line] + [
+                        line for line in activity_lines if live_label not in line
+                    ]
+            if activity_lines:
+                sections["activity"] = activity_lines[:item_limit]
+            scene_lines = self._build_recent_scene_summary_lines(
+                lookback_hours=lookback_hours,
+                limit=max(3, min(item_limit, 5)),
+            )
+            if scene_lines:
+                sections["scene_summary"] = scene_lines
+            app_lines = self._build_recent_app_summary_lines(
+                lookback_hours=lookback_hours,
+                limit=max(3, min(item_limit, 5)),
+            )
+            if app_lines:
+                sections["app_summary"] = app_lines
+
+        if decision.get("include_input") and bool(getattr(self, "enable_input_stats", False)):
+            payload = self._build_input_stats_payload(
+                days=max(1, min(7, (lookback_hours + 23) // 24))
+            )
+            if payload.get("available"):
+                today = payload.get("today", {}) or {}
+                input_lines = [
+                    (
+                        f"今天本地输入约 {today.get('total_inputs_label', '0 次')}，"
+                        f"活跃 {today.get('active_minutes_label', '0 分钟')}"
+                    )
+                ]
+                peak_hour_label = str(today.get("peak_hour_label", "") or "").strip()
+                if peak_hour_label and peak_hour_label != "暂无":
+                    input_lines.append(f"输入高峰大致在 {peak_hour_label}")
+                sections["input"] = input_lines[:2]
+
+        if decision.get("include_browser_activity"):
+            browser_lines = self._build_recent_browsing_activity_lines(
+                lookback_hours=lookback_hours,
+                limit=item_limit,
+            )
+            if browser_lines:
+                sections["browser_activity"] = browser_lines[:item_limit]
+
+        if decision.get("include_local_browser_history"):
+            browser_history_lines = self._build_local_browser_history_lines(
+                lookback_minutes=browser_lookback_minutes,
+                limit=item_limit,
+            )
+            if browser_history_lines:
+                sections["browser_history"] = browser_history_lines[:item_limit]
+
+        prompt_lines = [
+            "可选旁证：下面这些是电脑使用情况的辅助线索，只在真的能帮助判断时再用。",
+            "优先级始终是当前屏幕 > 最近对话 > 使用轨迹旁证。",
+            "不要每次都逐条复述这些旁证，更不要让回复变成监控报告。",
+        ]
+        if sections.get("activity"):
+            prompt_lines.append("最近活动轨迹：")
+            prompt_lines.extend(f"- {line}" for line in sections["activity"])
+        if sections.get("scene_summary"):
+            prompt_lines.append("最近时间主要花在哪些场景：")
+            prompt_lines.extend(f"- {line}" for line in sections["scene_summary"])
+        if sections.get("app_summary"):
+            prompt_lines.append("最近常用应用：")
+            prompt_lines.extend(f"- {line}" for line in sections["app_summary"])
+        if sections.get("input"):
+            prompt_lines.append("本地输入活跃度：")
+            prompt_lines.extend(f"- {line}" for line in sections["input"])
+        if sections.get("browser_activity"):
+            prompt_lines.append("从窗口轨迹推断的最近浏览内容：")
+            prompt_lines.extend(f"- {line}" for line in sections["browser_activity"])
+        if sections.get("browser_history"):
+            prompt_lines.append("本地浏览器历史旁证：")
+            prompt_lines.extend(f"- {line}" for line in sections["browser_history"])
+
+        return {
+            **decision,
+            "sections": sections,
+            "prompt_block": "\n".join(prompt_lines) if sections else "",
         }
 
     def _detect_task_wrap_up_signal(

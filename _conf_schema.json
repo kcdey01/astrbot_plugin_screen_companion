@@ -107,6 +107,71 @@
       "use_companion_mode": true
     }
   },
+  "stealth_watch_mode": {
+    "description": "偷看模式",
+    "type": "bool",
+    "hint": "开启后会把回复调整得更像悄悄注意到一点变化后顺手接一句，减少“我看到你正在……”这种直白监控腔，更适合低打扰陪伴。",
+    "default": false,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "enable_usage_context_autopilot": {
+    "description": "允许自动参考使用情况",
+    "type": "bool",
+    "hint": "开启后，bot 会自行判断这轮是否需要参考电脑使用轨迹，例如最近用了哪些应用、停留了多久、最近在浏览什么页面。默认只作为旁证，不会每次都展开复述。",
+    "default": false,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "enable_local_browser_history": {
+    "description": "允许读取本地浏览器历史",
+    "type": "bool",
+    "hint": "仅在“允许自动参考使用情况”开启后生效。开启后，插件会在需要时从本机 Chromium 浏览器历史中读取最近访问记录作为旁证，隐私敏感场景建议关闭。",
+    "default": false,
+    "condition": {
+      "enabled": true,
+      "enable_usage_context_autopilot": true
+    }
+  },
+  "usage_context_lookback_hours": {
+    "description": "使用轨迹回看时长（小时）",
+    "type": "int",
+    "hint": "bot 在自动参考电脑使用情况时，最多回看最近多少小时的活动轨迹。",
+    "default": 6,
+    "min": 1,
+    "max": 72,
+    "condition": {
+      "enabled": true,
+      "enable_usage_context_autopilot": true
+    }
+  },
+  "browser_history_lookback_minutes": {
+    "description": "浏览历史回看时长（分钟）",
+    "type": "int",
+    "hint": "读取本地浏览器历史时，最多回看最近多少分钟。值越大覆盖越广，但更容易带来无关信息。",
+    "default": 180,
+    "min": 10,
+    "max": 1440,
+    "condition": {
+      "enabled": true,
+      "enable_usage_context_autopilot": true,
+      "enable_local_browser_history": true
+    }
+  },
+  "usage_context_item_limit": {
+    "description": "使用情况最多参考条数",
+    "type": "int",
+    "hint": "每次最多提炼多少条使用情况线索给 bot，当作辅助上下文。",
+    "default": 6,
+    "min": 1,
+    "max": 12,
+    "condition": {
+      "enabled": true,
+      "enable_usage_context_autopilot": true
+    }
+  },
   "screen_recognition_mode": {
     "description": "开启视频识别",
     "type": "bool",

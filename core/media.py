@@ -2611,6 +2611,7 @@ class ScreenCompanionMediaMixin:
         companion_prompt = _normalize_prompt_override(
             getattr(self, "companion_prompt", "")
         )
+        stealth_watch_mode = bool(getattr(self, "stealth_watch_mode", False))
 
         # 检查是否为陪伴模式
         if self.use_companion_mode:
@@ -2619,6 +2620,12 @@ class ScreenCompanionMediaMixin:
                 "你可以偶尔轻轻表达自己也想和用户一起看点内容、玩一局游戏或做个小测试，"
                 "但必须低频、自然，不要打断正事，更不能凭空捏造共同经历。"
             )
+            if stealth_watch_mode:
+                companion_supplemental_guide += (
+                    "当前同时开启了偷看模式：更像一个悄悄关注状态变化的贴身伙伴。"
+                    "尽量少说“我看到你”“我一直在看”，更适合用低打扰、顺手接话的方式表达观察。"
+                    "在有帮助时可以参考用户最近的电脑使用轨迹，但不要把回复写成监控播报。"
+                )
             effective_prompt = (
                 companion_prompt or base_prompt or config_prompt or DEFAULT_SYSTEM_PROMPT
             )
@@ -2636,6 +2643,11 @@ class ScreenCompanionMediaMixin:
             "可以偶尔表达自己也想和用户一起做点什么，但只限轻松自然的一句，"
             "并且任何共同经历都只能基于当前对话或已记录内容，不能虚构。"
         )
+        if stealth_watch_mode:
+            supplemental_guide += (
+                "当前开启了偷看模式：减少直白的窥视感，避免频繁说“我看到你正在……”。"
+                "更像是悄悄留意到一点状态变化后，顺手低声说一句。"
+            )
 
         return f"{base_prompt.rstrip()}{supplemental_guide}"
 
@@ -4911,6 +4923,21 @@ class ScreenCompanionMediaMixin:
             analysis_trace["request_intent_action"] = str(
                 request_intent.get("action", "") or ""
             )
+            usage_context_bundle = self._build_usage_context_prompt_bundle(
+                scene=scene,
+                active_window_title=active_window_title,
+                request_intent=request_intent,
+                contexts=contexts,
+            )
+            analysis_trace["usage_context_reason"] = str(
+                usage_context_bundle.get("reason", "") or ""
+            )
+            analysis_trace["usage_context_used"] = bool(
+                usage_context_bundle.get("used", False)
+            )
+            analysis_trace["usage_context_sections"] = list(
+                dict(usage_context_bundle.get("sections", {}) or {}).keys()
+            )
 
             prompt_parts: list[str] = []
             intent_first_guide = self._build_intent_first_screen_reply_guide(
@@ -4921,6 +4948,8 @@ class ScreenCompanionMediaMixin:
                 prompt_parts.append(intent_first_guide)
             if fact_digest.get("prompt_block"):
                 prompt_parts.append(str(fact_digest.get("prompt_block", "")))
+            if usage_context_bundle.get("prompt_block"):
+                prompt_parts.append(str(usage_context_bundle.get("prompt_block", "")))
             if effective_use_external_vision:
                 prompt_parts.extend(
                     [
@@ -4950,6 +4979,21 @@ class ScreenCompanionMediaMixin:
             analysis_trace["memory_hints"] = []
             analysis_trace["preference_hints"] = []
             analysis_trace["wrap_up_detected"] = False
+            social_chat_context = self._build_social_chat_context(
+                scene=scene,
+                contexts=contexts,
+                request_intent=request_intent,
+                presence_mode=presence_mode,
+                reply_interval_info=reply_interval_info,
+                recognition_text=recognition_text,
+                active_window_title=active_window_title,
+            )
+            analysis_trace["social_chat_style"] = str(
+                social_chat_context.get("style", "") or ""
+            )
+            analysis_trace["social_chat_label"] = str(
+                social_chat_context.get("label", "") or ""
+            )
 
             if custom_prompt:
                 prompt_parts.append(f"额外要求：{custom_prompt}")
@@ -4988,6 +5032,19 @@ class ScreenCompanionMediaMixin:
                     context_count=len(contexts),
                 )
             )
+            if social_chat_context.get("guidance"):
+                prompt_parts.append(
+                    "私聊语境：\n" + str(social_chat_context.get("guidance", "")).strip()
+                )
+            if social_chat_context.get("last_user"):
+                prompt_parts.append(
+                    f"上一条用户语气参考：{social_chat_context.get('last_user')}"
+                )
+            if social_chat_context.get("last_assistant"):
+                prompt_parts.append(
+                    "上一条助手语气参考："
+                    + str(social_chat_context.get("last_assistant", "")).strip()
+                )
 
             latest_window_title = self._normalize_window_title(
                 capture_context.get("latest_window_title", "")

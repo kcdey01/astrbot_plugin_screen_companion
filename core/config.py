@@ -43,9 +43,15 @@ class PluginConfig(BaseModel):
     current_preset_index: int = 0  # 当前使用的预设索引
     use_companion_mode: bool = False  # 是否额外追加陪伴式互动约束，不影响自动观察开关
     companion_prompt: str = ""  # 陪伴模式专用人格，留空则沿用当前 AstrBot 人格或 system_prompt
+    stealth_watch_mode: bool = False  # 偷看模式，弱化直白监控腔，强调低打扰观察感
+    enable_usage_context_autopilot: bool = False  # 允许 bot 自行决定是否参考电脑使用情况
+    enable_local_browser_history: bool = False  # 允许读取本地浏览器历史作为旁证
+    usage_context_lookback_hours: int = 6  # 活动轨迹回看窗口
+    browser_history_lookback_minutes: int = 180  # 浏览器历史回看窗口
+    usage_context_item_limit: int = 6  # 每次最多提炼多少条使用情况线索
     capture_active_window: bool = False  # 是否只截取活动窗口
     bot_vision_quality: int = 85
-    image_prompt: str = "请用尽量少的字分析这张屏幕截图，只输出高价值信息。优先判断：1. 用户当前在做什么任务 2. 进行到哪一步 3. 画面里最关键的线索或异常 4. 如果需要互动，最值得给出的一个任务相关建议点。避免大段描述界面，不要重复无意义细节，控制在4行内。"
+    image_prompt: str = "请基于当前屏幕里能直接看清的内容做判断，只输出高价值信息。优先回答：1. 用户现在在做什么 2. 进行到哪一步 3. 当前画面里最关键的确定线索 4. 如果要互动，最值得提的一句建议。看不清就明确说看不清，不要靠常识补全，不要猜英雄、模式、装备、战况、聊天对象或按钮状态。控制在4行内。"
     screen_recognition_mode: bool = False
     ffmpeg_path: str = ""
     recording_fps: float = 1.0
