@@ -178,13 +178,13 @@ def main():
     parser = argparse.ArgumentParser(description="Remote Screen Companion Client")
     parser.add_argument(
         "--server", "-s",
-        default="ws://39.105.81.33:6315",
-        help="WebSocket server URL (default: ws://39.105.81.33:6315)",
+        required=True,
+        help="WebSocket server URL, e.g. ws://your-server:6315",
     )
     parser.add_argument(
         "--token", "-t",
-        default="sc_remote_2026",
-        help="Authentication token",
+        required=True,
+        help="Authentication token (must match server config)",
     )
     parser.add_argument(
         "--interval", "-i",

@@ -3259,14 +3259,22 @@ class ScreenCompanionMediaMixin:
         # Remote mode: return latest screenshot from WebSocket receiver
         if self._get_runtime_flag("remote_mode"):
             receiver = getattr(self, "_remote_receiver", None)
-            if receiver and receiver.has_screenshot:
-                image_bytes, window_title, meta = await receiver.get_latest_screenshot()
-                if image_bytes:
-                    return image_bytes, window_title or "远程客户端截图"
-                raise RuntimeError("远程客户端已连接但尚未推送截图")
-            raise RuntimeError(
-                "远程模式已开启但无可用截图，请确认客户端已连接并推送截图"
-            )
+            if receiver is None:
+                raise RuntimeError("远程模式已开启但接收服务未初始化")
+            if not receiver.has_screenshot:
+                raise RuntimeError(
+                    "远程模式已开启但无可用截图，请确认客户端已连接并推送截图"
+                )
+            max_age = max(5, int(getattr(self, "remote_screenshot_max_age", 60) or 60))
+            age = receiver.latest_age_seconds
+            if age > max_age:
+                raise RuntimeError(
+                    f"远程截图已过期（{int(age)} 秒前），客户端可能已断开，请检查连接"
+                )
+            image_bytes, window_title, meta = await receiver.get_latest_screenshot()
+            if image_bytes:
+                return image_bytes, window_title or "远程客户端截图"
+            raise RuntimeError("远程客户端已连接但尚未推送截图")
 
         def _core_task():
             import os
@@ -4525,6 +4533,15 @@ class ScreenCompanionMediaMixin:
 
     def _check_screenshot_env(self, check_mic: bool = False) -> tuple[bool, str]:
         if self._get_runtime_flag("remote_mode"):
+            try:
+                import websockets  # noqa: F401
+            except ImportError:
+                return False, "远程模式需要 websockets 库，请执行: pip install websockets"
+            receiver = getattr(self, "_remote_receiver", None)
+            if receiver is None:
+                return False, "远程模式接收服务未初始化，请检查插件配置"
+            if receiver._server is None:
+                return False, "远程模式 WebSocket 服务未启动，请检查端口配置或日志"
             return True, ""
 
         dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
