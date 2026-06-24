@@ -119,6 +119,7 @@ class PluginConfig(BaseModel):
     remote_mode: bool = False
     remote_ws_port: int = 6315
     remote_auth_token: str = ""
+    remote_screenshot_max_age: int = 60
     custom_tasks: str = ""
     rest_time_range: str = "22:00-06:00"
     enable_learning: bool = True

@@ -16,7 +16,7 @@ from astrbot.api import logger
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
 
-    APP_VERSION = "3.1.1"
+    APP_VERSION = "3.2.0"
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000
@@ -2909,6 +2909,10 @@ class WebServer:
                     "save_local",
                     "use_shared_screenshot_dir",
                     "shared_screenshot_dir",
+                    "remote_mode",
+                    "remote_ws_port",
+                    "remote_auth_token",
+                    "remote_screenshot_max_age",
                     "bot_vision_quality",
                     "image_quality",
                     "image_prompt",
@@ -3192,6 +3196,10 @@ class WebServer:
             "recording_duration_seconds",
             "use_shared_screenshot_dir",
             "shared_screenshot_dir",
+            "remote_mode",
+            "remote_ws_port",
+            "remote_auth_token",
+            "remote_screenshot_max_age",
             "bot_vision_quality",
             "image_quality",
             "allow_unsafe_video_direct_fallback",
@@ -3238,6 +3246,9 @@ class WebServer:
             "recording_fps": {"screen_recognition_mode": True},
             "recording_duration_seconds": {"screen_recognition_mode": True},
             "shared_screenshot_dir": {"use_shared_screenshot_dir": True},
+            "remote_ws_port": {"remote_mode": True},
+            "remote_auth_token": {"remote_mode": True},
+            "remote_screenshot_max_age": {"remote_mode": True},
             "allow_unsafe_video_direct_fallback": {"use_external_vision": True},
             "vision_provider_id": {"use_external_vision": True},
             "vision_provider_id_backup": {"use_external_vision": True},
@@ -3556,6 +3567,12 @@ class WebServer:
             "use_external_vision": self._plugin_bool("use_external_vision"),
             "use_shared_screenshot_dir": self._plugin_bool("use_shared_screenshot_dir"),
             "shared_screenshot_dir": getattr(self.plugin, "shared_screenshot_dir", "") or "",
+            "remote_mode": self._plugin_bool("remote_mode"),
+            "remote_ws_port": int(getattr(self.plugin, "remote_ws_port", 6315) or 6315),
+            "remote_auth_token": getattr(self.plugin, "remote_auth_token", "") or "",
+            "remote_screenshot_max_age": int(
+                getattr(self.plugin, "remote_screenshot_max_age", 60) or 60
+            ),
             "enable_natural_language_screen_assist": self._plugin_bool("enable_natural_language_screen_assist"),
             "enable_window_companion": self._plugin_bool("enable_window_companion"),
             "window_companion_targets": getattr(self.plugin, "window_companion_targets", "") or "",

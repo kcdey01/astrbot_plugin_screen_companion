@@ -5,3 +5,4 @@ pygetwindow
 aiohttp
 psutil
 pynput
+websockets

@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""WebSocket receiver for remote screen companion mode.
-
-Clients connect and push screenshot JPEG + metadata JSON.
-The receiver stores the latest screenshot for the plugin to consume.
-"""
+"""WebSocket receiver for remote screen companion mode."""
 from __future__ import annotations
 
 import asyncio
@@ -22,11 +18,11 @@ except ImportError:
 
 
 class RemoteScreenReceiver:
-    """WebSocket server that receives screenshots from remote clients."""
+    """Receive screenshots from a remote desktop client over WebSocket."""
 
     def __init__(self, *, port: int = 6315, auth_token: str = ""):
-        self.port = port
-        self.auth_token = auth_token.strip()
+        self.port = max(1, int(port or 6315))
+        self.auth_token = str(auth_token or "").strip()
         self._server = None
         self._latest_image_bytes: bytes = b""
         self._latest_window_title: str = ""
@@ -40,18 +36,27 @@ class RemoteScreenReceiver:
         return bool(self._latest_image_bytes) and self._latest_timestamp > 0.0
 
     @property
+    def is_running(self) -> bool:
+        return self._server is not None
+
+    @property
     def latest_age_seconds(self) -> float:
         if self._latest_timestamp <= 0:
             return float("inf")
         return time.time() - self._latest_timestamp
 
     async def get_latest_screenshot(self) -> tuple[bytes, str, dict[str, Any]]:
-        """Return (jpeg_bytes, window_title, meta_dict)."""
         async with self._lock:
-            return self._latest_image_bytes, self._latest_window_title, dict(self._latest_meta)
+            return (
+                self._latest_image_bytes,
+                self._latest_window_title,
+                dict(self._latest_meta),
+            )
 
     async def start(self) -> None:
-        if websockets is None:
+        if self.is_running:
+            return
+        if websockets is None or ws_serve is None:
             logger.error("websockets 库未安装，无法启动远程接收服务")
             return
 
@@ -63,11 +68,12 @@ class RemoteScreenReceiver:
         logger.info(f"远程识屏 WebSocket 服务已启动，监听端口 {self.port}")
 
     async def stop(self) -> None:
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
-            logger.info("远程识屏 WebSocket 服务已停止")
+        if not self._server:
+            return
+        self._server.close()
+        await self._server.wait_closed()
+        self._server = None
+        logger.info("远程识屏 WebSocket 服务已停止")
 
     async def _handle_client(self, websocket) -> None:
         client_addr = websocket.remote_address
@@ -75,7 +81,6 @@ class RemoteScreenReceiver:
         self._connected_clients.add(websocket)
 
         try:
-            # First message should be auth if token is set
             if self.auth_token:
                 try:
                     auth_msg = await asyncio.wait_for(websocket.recv(), timeout=10.0)
@@ -92,10 +97,8 @@ class RemoteScreenReceiver:
                     await websocket.close(4003, f"认证错误: {e}")
                     return
             else:
-                # No auth required, send ready signal
                 await websocket.send(json.dumps({"status": "ready"}))
 
-            # Main loop: receive screenshots
             async for message in websocket:
                 await self._process_message(message, websocket)
 
@@ -105,62 +108,71 @@ class RemoteScreenReceiver:
             logger.error(f"远程识屏客户端处理异常: {e}")
         finally:
             self._connected_clients.discard(websocket)
-            logger.info(f"客户端断开: {client_addr}，当前连接数: {len(self._connected_clients)}")
+            logger.info(
+                f"客户端断开: {client_addr}，当前连接数: {len(self._connected_clients)}"
+            )
 
     async def _process_message(self, message, websocket) -> None:
-        """Process incoming message: either binary (JPEG) or text (JSON metadata)."""
         if isinstance(message, bytes):
-            # Binary: raw JPEG screenshot data
             async with self._lock:
                 self._latest_image_bytes = message
                 self._latest_timestamp = time.time()
             logger.debug(f"收到截图: {len(message)} bytes")
+            return
 
-        elif isinstance(message, str):
-            # Text: JSON metadata
+        if not isinstance(message, str):
+            await websocket.send(json.dumps({"error": "不支持的消息类型"}))
+            return
+
+        try:
+            data = json.loads(message)
+        except json.JSONDecodeError:
+            await websocket.send(json.dumps({"error": "无效 JSON"}))
+            return
+
+        msg_type = data.get("type", "")
+
+        if msg_type == "screenshot_meta":
+            async with self._lock:
+                self._latest_window_title = str(data.get("window_title", "") or "")
+                self._latest_meta = {
+                    "window_title": self._latest_window_title,
+                    "system_stats": data.get("system_stats", {}),
+                    "timestamp": data.get("timestamp", time.time()),
+                    "client_id": data.get("client_id", ""),
+                }
+            await websocket.send(json.dumps({"status": "meta_received"}))
+            return
+
+        if msg_type == "ping":
+            await websocket.send(json.dumps({"type": "pong", "ts": time.time()}))
+            return
+
+        if msg_type == "screenshot_bundle":
+            import base64
+
+            jpeg_b64 = str(data.get("image", "") or "")
+            if not jpeg_b64:
+                await websocket.send(json.dumps({"error": "缺少 image 字段"}))
+                return
             try:
-                data = json.loads(message)
-            except json.JSONDecodeError:
-                await websocket.send(json.dumps({"error": "无效 JSON"}))
+                jpeg_bytes = base64.b64decode(jpeg_b64)
+            except Exception:
+                await websocket.send(json.dumps({"error": "image 字段不是有效的 base64"}))
                 return
 
-            msg_type = data.get("type", "")
+            async with self._lock:
+                self._latest_image_bytes = jpeg_bytes
+                self._latest_window_title = str(data.get("window_title", "") or "")
+                self._latest_meta = {
+                    "window_title": self._latest_window_title,
+                    "system_stats": data.get("system_stats", {}),
+                    "timestamp": data.get("timestamp", time.time()),
+                    "client_id": data.get("client_id", ""),
+                }
+                self._latest_timestamp = time.time()
+            await websocket.send(json.dumps({"status": "screenshot_received"}))
+            logger.debug(f"收到 bundle 截图: {len(jpeg_bytes)} bytes")
+            return
 
-            if msg_type == "screenshot_meta":
-                # Metadata for the next/previous screenshot
-                async with self._lock:
-                    self._latest_window_title = str(data.get("window_title", "") or "")
-                    self._latest_meta = {
-                        "window_title": self._latest_window_title,
-                        "system_stats": data.get("system_stats", {}),
-                        "timestamp": data.get("timestamp", time.time()),
-                        "client_id": data.get("client_id", ""),
-                    }
-                await websocket.send(json.dumps({"status": "meta_received"}))
-
-            elif msg_type == "ping":
-                await websocket.send(json.dumps({"type": "pong", "ts": time.time()}))
-
-            elif msg_type == "screenshot_bundle":
-                # Combined: base64 JPEG + metadata in one message
-                import base64
-                jpeg_b64 = data.get("image", "")
-                if jpeg_b64:
-                    jpeg_bytes = base64.b64decode(jpeg_b64)
-                    async with self._lock:
-                        self._latest_image_bytes = jpeg_bytes
-                        self._latest_window_title = str(data.get("window_title", "") or "")
-                        self._latest_meta = {
-                            "window_title": self._latest_window_title,
-                            "system_stats": data.get("system_stats", {}),
-                            "timestamp": data.get("timestamp", time.time()),
-                            "client_id": data.get("client_id", ""),
-                        }
-                        self._latest_timestamp = time.time()
-                    await websocket.send(json.dumps({"status": "screenshot_received"}))
-                    logger.debug(f"收到 bundle 截图: {len(jpeg_bytes)} bytes")
-                else:
-                    await websocket.send(json.dumps({"error": "缺少 image 字段"}))
-
-            else:
-                await websocket.send(json.dumps({"error": f"未知消息类型: {msg_type}"}))
+        await websocket.send(json.dumps({"error": f"未知消息类型: {msg_type}"}))

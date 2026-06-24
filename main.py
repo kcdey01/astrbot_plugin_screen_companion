@@ -346,14 +346,8 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self._sync_all_config()
         self._instance_token = ""
         self._register_process_instance()
-
-        # Remote screen receiver
         self._remote_receiver = None
-        if self._get_runtime_flag("remote_mode"):
-            self._remote_receiver = RemoteScreenReceiver(
-                port=int(getattr(self, "remote_ws_port", 6315) or 6315),
-                auth_token=str(getattr(self, "remote_auth_token", "") or ""),
-            )
+        self._configure_remote_receiver_from_runtime()
         self._cleanup_legacy_default_custom_tasks()
         
         self.auto_tasks = {}
@@ -506,7 +500,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.last_shared_activity_invite_time = 0.0
         self._ensure_input_stats_listener()
         if self._remote_receiver:
-            task = asyncio.create_task(self._remote_receiver.start())
+            task = self._safe_create_task(
+                self._sync_remote_receiver_runtime(),
+                name="sync_remote_receiver_start",
+            )
             self.background_tasks.append(task)
         if self._use_screen_recording_mode():
             self._safe_create_task(
@@ -563,6 +560,46 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
     def _get_runtime_flag(self, name: str, default: bool = False) -> bool:
         return self._coerce_bool(getattr(self, name, default))
+
+    def _configure_remote_receiver_from_runtime(self) -> None:
+        if not self._get_runtime_flag("remote_mode"):
+            self._remote_receiver = None
+            return
+        self._remote_receiver = RemoteScreenReceiver(
+            port=max(1, int(getattr(self, "remote_ws_port", 6315) or 6315)),
+            auth_token=str(getattr(self, "remote_auth_token", "") or ""),
+        )
+
+    async def _sync_remote_receiver_runtime(self) -> None:
+        enabled = self._get_runtime_flag("remote_mode")
+        desired_port = max(1, int(getattr(self, "remote_ws_port", 6315) or 6315))
+        desired_token = str(getattr(self, "remote_auth_token", "") or "")
+        receiver = getattr(self, "_remote_receiver", None)
+
+        if not enabled:
+            if receiver:
+                await receiver.stop()
+                self._remote_receiver = None
+            return
+
+        if (
+            receiver
+            and int(getattr(receiver, "port", 0) or 0) == desired_port
+            and str(getattr(receiver, "auth_token", "") or "") == desired_token
+        ):
+            if not receiver.is_running:
+                await receiver.start()
+            return
+
+        if receiver:
+            await receiver.stop()
+
+        receiver = RemoteScreenReceiver(
+            port=desired_port,
+            auth_token=desired_token,
+        )
+        self._remote_receiver = receiver
+        await receiver.start()
 
     def _get_configured_admin_ids(self) -> set[str]:
         admin_ids: set[str] = set()
@@ -944,6 +981,20 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             self.plugin_config.shared_screenshot_dir,
             field_name="shared_screenshot_dir",
         )
+        self.remote_mode = self._coerce_bool(
+            getattr(self.plugin_config, "remote_mode", False)
+        )
+        self.remote_ws_port = max(
+            1,
+            int(getattr(self.plugin_config, "remote_ws_port", 6315) or 6315),
+        )
+        self.remote_auth_token = str(
+            getattr(self.plugin_config, "remote_auth_token", "") or ""
+        )
+        self.remote_screenshot_max_age = max(
+            5,
+            int(getattr(self.plugin_config, "remote_screenshot_max_age", 60) or 60),
+        )
         self.custom_tasks = self.plugin_config.custom_tasks
         self.rest_time_range = self.plugin_config.rest_time_range
         self.enable_learning = self._coerce_bool(self.plugin_config.enable_learning)
@@ -976,9 +1027,6 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             self.current_preset_index = -1
             self.plugin_config.current_preset_index = -1
         self._sync_window_companion_effective_params()
-        self.remote_mode = self._coerce_bool(getattr(self.plugin_config, "remote_mode", False))
-        self.remote_ws_port = max(1, int(getattr(self.plugin_config, "remote_ws_port", 6315) or 6315))
-        self.remote_auth_token = str(getattr(self.plugin_config, "remote_auth_token", "") or "")
         # 同步配置
         self.observation_storage = self._normalize_config_path(
             self.plugin_config.observation_storage,
@@ -1234,6 +1282,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
                 self._sync_all_config()
                 self._refresh_diary_storage_runtime()
+                self._safe_create_task(
+                    self._sync_remote_receiver_runtime(),
+                    name="sync_remote_receiver_runtime",
+                )
                 
                 if self.enable_mic_monitor:
                     self._ensure_mic_monitor_background_task()

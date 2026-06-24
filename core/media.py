@@ -2759,12 +2759,11 @@ class ScreenCompanionMediaMixin:
         """
         self._ensure_runtime_state()
         missing_libs = []
-        if self._use_screen_recording_mode():
+        if self._get_runtime_flag("remote_mode"):
+            pass
+        elif self._use_screen_recording_mode():
             if not self._get_ffmpeg_path():
                 missing_libs.append("ffmpeg")
-        elif self._get_runtime_flag("remote_mode"):
-            # Remote mode: no local screenshot dependencies needed
-            pass
         else:
             try:
                 import pyautogui
@@ -3256,7 +3255,6 @@ class ScreenCompanionMediaMixin:
     async def _capture_screen_bytes(self, *, force_fresh_capture: bool = False):
         """返回截图字节流与来源标签。"""
 
-        # Remote mode: return latest screenshot from WebSocket receiver
         if self._get_runtime_flag("remote_mode"):
             receiver = getattr(self, "_remote_receiver", None)
             if receiver is None:
@@ -3265,13 +3263,16 @@ class ScreenCompanionMediaMixin:
                 raise RuntimeError(
                     "远程模式已开启但无可用截图，请确认客户端已连接并推送截图"
                 )
-            max_age = max(5, int(getattr(self, "remote_screenshot_max_age", 60) or 60))
             age = receiver.latest_age_seconds
+            max_age = max(
+                5,
+                int(getattr(self, "remote_screenshot_max_age", 60) or 60),
+            )
             if age > max_age:
                 raise RuntimeError(
                     f"远程截图已过期（{int(age)} 秒前），客户端可能已断开，请检查连接"
                 )
-            image_bytes, window_title, meta = await receiver.get_latest_screenshot()
+            image_bytes, window_title, _meta = await receiver.get_latest_screenshot()
             if image_bytes:
                 return image_bytes, window_title or "远程客户端截图"
             raise RuntimeError("远程客户端已连接但尚未推送截图")
@@ -3610,6 +3611,10 @@ class ScreenCompanionMediaMixin:
         force_fresh_capture: bool = False,
         force_fresh_recording: bool = False,
     ) -> dict[str, Any]:
+        if self._get_runtime_flag("remote_mode"):
+            return await self._capture_screenshot_context(
+                force_fresh_capture=force_fresh_capture
+            )
         if self._use_screen_recording_mode():
             if force_fresh_recording:
                 return await self._capture_one_shot_recording_context(
@@ -3622,6 +3627,8 @@ class ScreenCompanionMediaMixin:
         )
 
     async def _capture_proactive_recognition_context(self) -> dict[str, Any]:
+        if self._get_runtime_flag("remote_mode"):
+            return await self._capture_screenshot_context()
         if self._use_screen_recording_mode():
             return await self._capture_one_shot_recording_context(
                 self._get_recording_duration_seconds()
@@ -3640,7 +3647,6 @@ class ScreenCompanionMediaMixin:
         """调用外部视觉链路进行图像分析，优先使用 AstrBot 视觉 provider。"""
         import aiohttp
 
-        base64_data = base64.b64encode(media_bytes).decode("utf-8")
         image_prompt = self._build_vision_prompt(scene, active_window_title)
         if media_kind == "video":
             image_prompt = (
@@ -3702,6 +3708,34 @@ class ScreenCompanionMediaMixin:
             if not api_url:
                 return None, "未配置视觉 API 地址"
 
+            payload_media_bytes = media_bytes
+            payload_mime_type = mime_type
+            if media_kind == "video":
+                sampled_capture_context = await self._build_video_sample_capture_context(
+                    {
+                        "media_bytes": media_bytes,
+                    },
+                    scene=scene,
+                    use_external_vision=True,
+                )
+                if not sampled_capture_context:
+                    return (
+                        None,
+                        "当前视觉链路不支持直接分析录屏视频，且关键帧拼图生成失败。",
+                    )
+                logger.warning(
+                    "旧版视觉 API 不支持原生视频载荷，改用录屏关键帧拼图兼容发送。"
+                )
+                payload_media_bytes = sampled_capture_context.get("media_bytes", b"") or b""
+                payload_mime_type = str(
+                    sampled_capture_context.get("mime_type", "image/jpeg")
+                    or "image/jpeg"
+                )
+
+            payload_data_url = self._build_data_url(
+                payload_media_bytes,
+                payload_mime_type,
+            )
             payload = {
                 "model": api_model,
                 "messages": [
@@ -3712,7 +3746,7 @@ class ScreenCompanionMediaMixin:
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:{mime_type};base64,{base64_data}"
+                                    "url": payload_data_url
                                 },
                             },
                         ],
@@ -4325,17 +4359,51 @@ class ScreenCompanionMediaMixin:
         if native_response is not None:
             return native_response
 
-        if media_kind == "video" and not self._coerce_bool(
-            getattr(self, "allow_unsafe_video_direct_fallback", False)
-        ):
-            raise RuntimeError(
-                "当前 provider 不支持原生视频上传，已拦截视频直发以避免过度消耗 token。"
-                "请开启外部视觉 API，或切换到官方 Gemini API 并配置 GEMINI_API_KEY。"
-            )
         if media_kind == "video":
-            logger.warning(
-                "当前 provider 不支持原生视频上传，但已按配置允许回退到兼容视频直发。"
-                "这可能导致请求体很大，并带来较高的 token 消耗。"
+            sampled_capture_context = await self._build_video_sample_capture_context(
+                {
+                    "media_bytes": media_bytes,
+                },
+                scene="",
+                use_external_vision=False,
+            )
+            if sampled_capture_context:
+                logger.warning(
+                    "当前 provider 不支持原生视频上传，改用录屏关键帧拼图兼容发送。"
+                )
+                sampled_prompt = interaction_prompt
+                sampled_hint = (
+                    "补充要求：当前收到的是录屏关键帧拼图，只能依据画面判断，"
+                    "请不要假设视频中的音频内容。"
+                )
+                if sampled_hint not in sampled_prompt:
+                    sampled_prompt = "\n\n".join(
+                        part for part in (interaction_prompt, sampled_hint) if part
+                    )
+                return await self._call_provider_multimodal_direct(
+                    provider=provider,
+                    interaction_prompt=sampled_prompt,
+                    system_prompt=system_prompt,
+                    media_bytes=sampled_capture_context.get("media_bytes", b"") or b"",
+                    media_kind="image",
+                    mime_type=str(
+                        sampled_capture_context.get("mime_type", "image/jpeg")
+                        or "image/jpeg"
+                    ),
+                    provider_id=provider_id,
+                )
+
+            if not self._coerce_bool(
+                getattr(self, "allow_unsafe_video_direct_fallback", False)
+            ):
+                raise RuntimeError(
+                    "当前 provider 不支持原生视频上传，且关键帧拼图生成失败。"
+                    "请开启外部视觉 API，或切换到官方 Gemini API 并配置 GEMINI_API_KEY。"
+                )
+            raise RuntimeError(
+                "当前 provider 不支持原生视频上传，且关键帧拼图生成失败，"
+                "无法安全执行兼容视频直发。请检查 ffmpeg 是否可用，"
+                "或改用支持原生视频的模型。"
             )
 
         data_url = self._build_data_url(media_bytes, mime_type)
@@ -4515,6 +4583,11 @@ class ScreenCompanionMediaMixin:
         return screen_result
 
     def _check_recording_env(self, check_mic: bool = False) -> tuple[bool, str]:
+        if self._get_runtime_flag("remote_mode"):
+            return (
+                False,
+                "远程模式当前只支持截图推送，不支持远程录屏。请使用 /kp，或关闭远程模式后再用 /kpr。",
+            )
         dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
         if not dep_ok:
             return False, dep_msg
@@ -4540,10 +4613,9 @@ class ScreenCompanionMediaMixin:
             receiver = getattr(self, "_remote_receiver", None)
             if receiver is None:
                 return False, "远程模式接收服务未初始化，请检查插件配置"
-            if receiver._server is None:
+            if not receiver.is_running:
                 return False, "远程模式 WebSocket 服务未启动，请检查端口配置或日志"
             return True, ""
-
         dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
         if not dep_ok and "ffmpeg" not in str(dep_msg or "").lower():
             return False, dep_msg

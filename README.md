@@ -10,8 +10,8 @@ astrbot_plugin_screen_companion 是面向 AstrBot 的屏幕伙伴插件。它能
 
 ## 版本
 
-当前版本：`3.1.3`
-`3.1.3` 新增 macOS 录屏识别支持，macOS 下会通过 ffmpeg `avfoundation` 自动寻找屏幕录制设备；同时保留 `3.1.2` 的输入统计卡顿修复。
+当前版本：`3.2.0`
+`3.2.0` 新增远程识屏模式，可通过 WebSocket 从本地图形桌面向插件实例推送截图；同时补上远程截图过期校验、环境检查收紧，以及视频兼容直发的稳定性修复。
 
 ### 3.0.0 更新重点
 
@@ -211,6 +211,64 @@ services:
 - `use_shared_screenshot_dir` 必须为 `true`
 - `shared_screenshot_dir` 填容器内路径，不是宿主机路径
 - 如果开启 WebUI 并需要浏览器访问，请映射对应端口
+
+## 远程识屏模式（WebSocket）
+
+如果 AstrBot 跑在云服务器，但你仍想让插件看到本地电脑画面，可以使用 `3.2.0` 新增的远程识屏模式。它和“共享截图目录模式”不同，不依赖 Docker 目录挂载，而是由本地客户端通过 WebSocket 主动把截图推送给插件。
+
+### 适用场景
+
+- AstrBot 运行在远程服务器或另一台机器上
+- 你本地电脑有图形桌面，可以正常截图
+- 你目前只需要截图识别，不需要远程录屏
+
+### 插件端配置
+
+请确认以下配置：
+
+```json
+{
+  "enabled": true,
+  "screen_recognition_mode": false,
+  "remote_mode": true,
+  "remote_ws_port": 6315,
+  "remote_auth_token": "请改成你自己的随机令牌",
+  "remote_screenshot_max_age": 60
+}
+```
+
+注意：
+
+- `remote_mode` 开启后，插件会改为等待远程客户端推送截图。
+- `screen_recognition_mode` 仍建议保持为截图模式；远程模式当前不支持录屏。
+- `remote_auth_token` 建议务必设置，不要留空。
+- `remote_screenshot_max_age` 用来限制截图的新鲜度，超过阈值未收到新图时会提示截图过期。
+
+### 客户端依赖
+
+先在本地图形桌面安装依赖：
+
+```bash
+pip install pyautogui Pillow websockets
+```
+
+### 启动客户端
+
+在本地电脑运行：
+
+```bash
+python remote_client.py --server ws://你的服务器地址:6315 --token 你的令牌
+```
+
+常用参数：
+
+- `--server`：插件端 WebSocket 地址，必填
+- `--token`：认证令牌，建议与插件配置保持一致
+- `--interval`：截图推送间隔秒数，默认 10
+- `--quality`：JPEG 质量，默认 70
+- `--client-id`：客户端标识，选填
+
+运行成功后，插件侧即可使用 `/kp` 读取远程客户端推送的最新截图。
 
 ### Linux 开机自启示例
 
