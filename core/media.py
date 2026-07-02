@@ -2820,6 +2820,13 @@ class ScreenCompanionMediaMixin:
         Args:
             check_mic: Whether microphone-related dependencies are required.
         """
+        # Remote mode: no local desktop needed
+        if self._coerce_bool(getattr(self, "remote_mode", False)):
+            receiver = getattr(self, "_remote_receiver", None)
+            if receiver and receiver.is_running:
+                return True, ""
+            return False, "远程模式接收服务未就绪，请检查插件配置"
+
         dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
         if not dep_ok:
             return False, dep_msg
